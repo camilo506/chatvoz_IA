@@ -16,8 +16,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${inter.variable} ${orbitron.variable} font-sans bg-[#0a0a0a] text-white antialiased`}>
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <body 
+        className={`${inter.variable} ${orbitron.variable} font-sans bg-[#0a0a0a] text-white antialiased`}
+        suppressHydrationWarning
+      >
         {children}
       </body>
     </html>

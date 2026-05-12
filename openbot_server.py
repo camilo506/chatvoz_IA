@@ -1,8 +1,5 @@
 import os
 import threading
-import sounddevice as sd
-import numpy as np
-import scipy.io.wavfile as wav
 from groq import Groq
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,16 +7,13 @@ import uvicorn
 import json
 import time
 import asyncio
-import sounddevice as sd
 
 # Configuración
-API_KEY = ""
-client = Groq(api_key=API_KEY)
-RATE = 44100
-
+API_KEY = "" # Respaldo
+TELEGRAM_TOKEN = "8689817549:AAH-53j1LwmGEJYoueJ6GfObKeNEJ-BtmSg"
 app = FastAPI()
 
-# Habilitar CORS para que el dashboard web pueda comunicarse
+# Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,14 +24,39 @@ app.add_middleware(
 
 class OpenBotBrain:
     def __init__(self):
-        self.history = [
-            {"role": "system", "content": "Eres OpenBot, un sistema de agentes autónomos avanzado. Tu objetivo es ayudar al usuario a programar, crear agentes y automatizar tareas. Responde siempre en español de forma profesional, eficiente y segura."}
-        ]
-        self.is_listening = False
         self.logs = []
-        self.recording_active = False
-        self.audio_data = []
-        self.current_stream = None
+        self.agents_file = "agents.json"
+        self.agents = self.load_agents()
+        self.active_agent_name = "OpenBot Original"
+        self.history = self.get_agent_history(self.active_agent_name)
+        self.telegram_chat_id = None # Se guardará al recibir el primer mensaje
+
+    def load_agents(self):
+        if os.path.exists(self.agents_file):
+            try:
+                with open(self.agents_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                return self.get_default_agents()
+        return self.get_default_agents()
+
+    def get_default_agents(self):
+        default = {
+            "OpenBot Original": {
+                "role": "Asistente General",
+                "instructions": "Eres OpenBot, un sistema de agentes autónomos avanzado. Tu objetivo es ayudar al usuario a programar, crear agentes y automatizar tareas. Responde siempre en español de forma profesional y segura."
+            }
+        }
+        self.save_agents_to_file(default)
+        return default
+
+    def save_agents_to_file(self, agents_dict):
+        with open(self.agents_file, "w", encoding="utf-8") as f:
+            json.dump(agents_dict, f, indent=4, ensure_ascii=False)
+
+    def get_agent_history(self, agent_name):
+        agent = self.agents.get(agent_name, self.agents["OpenBot Original"])
+        return [{"role": "system", "content": agent["instructions"]}]
 
     def add_log(self, message, type="info"):
         log_entry = {"time": time.strftime("%H:%M:%S"), "message": message, "type": type}
@@ -45,165 +64,125 @@ class OpenBotBrain:
         print(f"[{type.upper()}] {message}")
         return log_entry
 
+    def process_command(self, text):
+        """
+        Procesa comandos de texto y ejecuta acciones en el sistema.
+        Retorna (respuesta, fue_comando)
+        """
+        t = text.lower()
+        
+        # 1. Info del Sistema
+        if any(x in t for x in ["componentes", "hardware", "dime mi pc", "info sistema"]):
+            import platform
+            try:
+                cpu = platform.processor() or "Desconocido"
+                os_info = f"{platform.system()} {platform.release()}"
+                ram = "Desconocida"
+                try:
+                    import psutil
+                    ram = f"{round(psutil.virtual_memory().total / (1024**3), 2)} GB"
+                except: pass
+                res = f"🖥️ Sistema: {os_info}\n🧠 CPU: {cpu}\n💾 RAM: {ram}"
+                return res, True
+            except:
+                return "Error al leer hardware.", True
+
+        # 2. Creación de Carpetas
+        if "crea" in t and "carpeta" in t:
+            import os
+            try:
+                name = "Nueva Carpeta"
+                path = os.path.join(os.path.expanduser("~"), "Desktop")
+                
+                if " en " in t:
+                    parts = t.split(" en ")
+                    name_part = parts[0].split("carpeta")[-1].replace("llamada", "").replace("con nombre", "").strip()
+                    path_part = parts[1].split(" y pon")[0].strip()
+                    if name_part: name = name_part
+                    if path_part and path_part != "escritorio": path = path_part
+                else:
+                    name_part = t.split("carpeta")[-1].replace("llamada", "").replace("con nombre", "").strip()
+                    if name_part: name = name_part
+
+                full_path = os.path.join(path, name)
+                if not os.path.exists(full_path):
+                    os.makedirs(full_path)
+                
+                res = f"✅ Carpeta '{name}' creada en {path}"
+                if "y pon" in t or "con la info" in t:
+                    with open(os.path.join(full_path, "info.txt"), "w") as f:
+                        f.write(f"Reporte generado por OpenBot\nFecha: {time.ctime()}")
+                    res += " con el archivo de información."
+                return res, True
+            except Exception as e:
+                return f"❌ Error creando carpeta: {str(e)}", True
+
+        return None, False
+
 brain = OpenBotBrain()
+
+# --- LÓGICA DE TELEGRAM ---
+def telegram_worker():
+    import requests
+    last_update_id = 0
+    brain.add_log("Telegram Worker activo y esperando...", "telegram")
+    
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            params = {"offset": last_update_id + 1, "timeout": 30}
+            response = requests.get(url, params=params).json()
+            
+            if "result" in response:
+                for update in response["result"]:
+                    last_update_id = update["update_id"]
+                    if "message" in update and "text" in update["message"]:
+                        chat_id = update["message"]["chat"]["id"]
+                        text = update["message"]["text"]
+                        
+                        # Guardar el chat_id del primer mensaje (dueño)
+                        if not brain.telegram_chat_id:
+                            brain.telegram_chat_id = chat_id
+                            brain.add_log(f"Telegram enlazado con Chat ID: {chat_id}", "success")
+
+                        brain.add_log(f"Telegram [{chat_id}]: {text}", "user")
+                        
+                        # 1. Ver si es comando
+                        cmd_res, is_cmd = brain.process_command(text)
+                        
+                        if is_cmd:
+                            final_res = cmd_res
+                        else:
+                            # 2. Si no es comando, usar IA (Nube por defecto para Telegram)
+                            try:
+                                # Aquí podríamos reusar la lógica de chat de la nube
+                                from groq import Groq
+                                temp_client = Groq(api_key=API_KEY)
+                                history = brain.get_agent_history(brain.active_agent_name)
+                                history.append({"role": "user", "content": text})
+                                completion = temp_client.chat.completions.create(
+                                    model="llama-3.3-70b-versatile",
+                                    messages=history
+                                )
+                                final_res = completion.choices[0].message.content
+                            except Exception as e:
+                                final_res = f"Error IA: {str(e)}"
+                        
+                        # Enviar respuesta a Telegram
+                        send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                        requests.post(send_url, json={"chat_id": chat_id, "text": final_res})
+                        
+            time.sleep(1)
+        except Exception as e:
+            print(f"Error en Telegram: {e}")
+            time.sleep(5)
+
+# Iniciar hilo de Telegram
+threading.Thread(target=telegram_worker, daemon=True).start()
 
 @app.get("/status")
 async def get_status():
     return {"status": "online", "name": "OpenBot Core"}
-
-@app.get("/audio/devices")
-async def get_audio_devices():
-    try:
-        devices = sd.query_devices()
-        input_devices = []
-        output_devices = []
-        
-        # Obtener dispositivos predeterminados
-        default_input = sd.default.device[0]
-        default_output = sd.default.device[1]
-
-        for i, d in enumerate(devices):
-            device_info = {
-                "id": i,
-                "name": d['name'],
-                "hostapi": d['hostapi'],
-                "max_input_channels": d['max_input_channels'],
-                "max_output_channels": d['max_output_channels'],
-                "is_default": (i == default_input or i == default_output)
-            }
-            if d['max_input_channels'] > 0:
-                input_devices.append(device_info)
-            if d['max_output_channels'] > 0:
-                output_devices.append(device_info)
-                
-        return {
-            "inputs": input_devices, 
-            "outputs": output_devices,
-            "default_input": default_input,
-            "default_output": default_output
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-def audio_callback(indata, frames, time, status):
-    if brain.recording_active:
-        brain.audio_data.append(indata.copy())
-
-@app.post("/audio/record/start")
-async def start_recording(request: dict):
-    device_id = request.get("device_id")
-    if brain.recording_active:
-        return {"status": "already_recording"}
-    
-    brain.audio_data = []
-    brain.recording_active = True
-    
-    try:
-        # Si device_id es None, sounddevice usará el predeterminado
-        brain.current_stream = sd.InputStream(
-            device=device_id,
-            channels=1,
-            samplerate=RATE,
-            callback=audio_callback
-        )
-        brain.current_stream.start()
-        brain.add_log(f"Grabación iniciada en dispositivo {device_id}", "system")
-        return {"status": "started"}
-    except Exception as e:
-        brain.recording_active = False
-        return {"error": str(e)}
-
-@app.post("/audio/record/stop")
-async def stop_recording(data: dict):
-    if not brain.recording_active:
-        return {"error": "not_recording"}
-    
-    brain.recording_active = False
-    if brain.current_stream:
-        brain.current_stream.stop()
-        brain.current_stream.close()
-    
-    if not brain.audio_data:
-        return {"error": "no_audio_data"}
-    
-    # Procesar audio
-    audio_np = np.concatenate(brain.audio_data, axis=0)
-    filename = "voice_input.wav"
-    wav.write(filename, RATE, audio_np)
-    
-    try:
-        # Usar la clave enviada por el frontend
-        current_key = data.get("cloud_key") or API_KEY
-        temp_client = Groq(api_key=current_key)
-        
-        with open(filename, "rb") as f:
-            transcription = temp_client.audio.transcriptions.create(
-                file=(filename, f.read()),
-                model="whisper-large-v3",
-                response_format="text"
-            )
-        brain.add_log(f"Voz procesada: {transcription}", "voice")
-        return {"text": transcription}
-    except Exception as e:
-        error_str = str(e)
-        if "429" in error_str:
-            msg = "¡Límite de créditos alcanzado! Groq necesita un breve descanso. "
-            if "try again in" in error_str:
-                tiempo = error_str.split("try again in")[-1].strip().split(".")[0]
-                msg += f"Por favor, inténtalo de nuevo en {tiempo}."
-            else:
-                msg += "Por favor, espera un minuto y vuelve a intentarlo."
-            brain.add_log(msg, "warning")
-            return {"error": msg}
-        
-        brain.add_log(f"Error en transcripción: {error_str}", "error")
-        return {"error": error_str}
-
-import base64
-from fastapi import FastAPI, WebSocket, UploadFile, File, Form
-
-# ... (código anterior)
-
-@app.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
-    temp_filename = "temp_audio.wav"
-    with open(temp_filename, "wb") as f:
-        f.write(await audio.read())
-    
-    try:
-        with open(temp_filename, "rb") as f:
-            transcription = client.audio.transcriptions.create(
-                file=(temp_filename, f.read()),
-                model="whisper-large-v3",
-                response_format="text"
-            )
-        brain.add_log(f"Audio transcrito: {transcription}", "voice")
-        return {"text": transcription}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...), description: str = Form(None)):
-    content = await file.read()
-    filename = file.filename
-    
-    # Guardar archivo localmente en una carpeta 'uploads'
-    if not os.path.exists("uploads"):
-        os.makedirs("uploads")
-    
-    filepath = os.path.join("uploads", filename)
-    with open(filepath, "wb") as f:
-        f.write(content)
-    
-    brain.add_log(f"Archivo subido: {filename}", "file")
-    
-    # Si es imagen, podríamos usar un modelo Vision
-    if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-        brain.add_log("Analizando imagen...", "vision")
-        # Simulación de respuesta vision
-        return {"status": "success", "message": f"Imagen {filename} recibida y analizada.", "type": "image"}
-    
-    return {"status": "success", "message": f"Archivo {filename} recibido.", "type": "text"}
 
 @app.post("/chat")
 async def chat(request: dict):
@@ -214,78 +193,123 @@ async def chat(request: dict):
     model = request.get("model", "llama3.2:latest")
     
     brain.add_log(f"Mensaje recibido [{mode.upper()}]: {message}", "user")
+    
+    if not brain.history:
+        brain.history = brain.get_agent_history(brain.active_agent_name)
+        
     brain.history.append({"role": "user", "content": message})
     
     if mode == "local":
-        brain.add_log(f"Consultando IA Local ({provider}) en {url}...", "agent")
         try:
             import requests
             response = requests.post(
                 f"{url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": brain.history,
-                    "stream": False
-                }
+                json={"model": model, "messages": brain.history, "stream": False}
             )
             response.raise_for_status()
             ai_response = response.json()["message"]["content"]
-            
             brain.history.append({"role": "assistant", "content": ai_response})
-            brain.add_log(f"Respuesta local ({model}) generada.", "success")
             return {"response": ai_response, "time": time.strftime("%I:%M %p")}
         except Exception as e:
-            error_msg = f"Error conectando con IA Local: {str(e)}"
-            brain.add_log(error_msg, "error")
-            return {"error": error_msg}
+            return {"error": f"Error Local: {str(e)}"}
     
-    # Modo Cloud (por defecto)
     try:
-        # Usar la API Key enviada desde el frontend si existe, si no usar la de respaldo
         cloud_key = request.get("cloud_key") or API_KEY
         temp_client = Groq(api_key=cloud_key)
-        
         completion = temp_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=brain.history
         )
         ai_response = completion.choices[0].message.content
         brain.history.append({"role": "assistant", "content": ai_response})
-        brain.add_log(f"Respuesta nube generada [{request.get('cloud_provider', 'Groq')}].", "success")
         return {"response": ai_response, "time": time.strftime("%I:%M %p")}
     except Exception as e:
-        error_str = str(e)
-        if "429" in error_str:
-            msg = "He agotado mis créditos temporales en la nube. "
-            if "try again in" in error_str:
-                tiempo = error_str.split("try again in")[-1].strip().split(".")[0]
-                msg += f"Podré responderte de nuevo en {tiempo}."
-            else:
-                msg += "Podré responderte de nuevo en un momento."
-            brain.add_log(msg, "warning")
-            return {"response": msg, "time": time.strftime("%I:%M %p"), "is_limit": True}
-            
-        brain.add_log(f"Error en Cloud: {str(e)}", "error")
-        return {"error": str(e)}
+        return {"error": f"Error Cloud: {str(e)}"}
 
 @app.post("/new-session")
 async def new_session():
-    brain.history = [brain.history[0]] # Mantener solo el system prompt
-    brain.add_log("Nueva sesión iniciada.", "system")
+    brain.history = brain.get_agent_history(brain.active_agent_name)
     return {"status": "cleared"}
+
+@app.get("/agents")
+async def get_agents():
+    return {"agents": brain.agents, "active": brain.active_agent_name}
+
+@app.post("/agents")
+async def create_agent(data: dict):
+    name, role, inst = data.get("name"), data.get("role"), data.get("instructions")
+    if name and inst:
+        brain.agents[name] = {"role": role or "Agente", "instructions": inst}
+        brain.save_agents_to_file(brain.agents)
+        return {"status": "success"}
+    return {"error": "Faltan datos"}
+
+@app.post("/agents/activate")
+async def activate_agent(data: dict):
+    name = data.get("name")
+    if name in brain.agents:
+        brain.active_agent_name = name
+        brain.history = brain.get_agent_history(name)
+        return {"status": "activated", "name": name}
+    return {"error": "No encontrado"}
+
+@app.delete("/agents/{name}")
+async def delete_agent(name: str):
+    if name != "OpenBot Original" and name in brain.agents:
+        del brain.agents[name]
+        brain.save_agents_to_file(brain.agents)
+        return {"status": "deleted"}
+    return {"error": "No permitido"}
+
+@app.get("/system-info")
+async def get_system_info():
+    import platform
+    try:
+        cpu = platform.processor() or "Procesador Genérico"
+        os_info = f"{platform.system()} {platform.release()}"
+        ram = "No disponible"
+        try:
+            import psutil
+            ram = f"{round(psutil.virtual_memory().total / (1024**3), 2)} GB"
+        except:
+            import subprocess
+            output = subprocess.check_output("wmic computersystem get totalphysicalmemory", shell=True).decode()
+            ram = f"{round(int(output.split()[1]) / (1024**3), 2)} GB"
+
+        return {"info": f"🖥️ **Sistema:** {os_info}\n🧠 **Procesador:** {cpu}\n💾 **Memoria RAM:** {ram}"}
+    except:
+        return {"info": "No pude acceder a la info del sistema."}
+
+@app.post("/create-folder-anywhere")
+async def create_folder_anywhere(data: dict):
+    import os
+    name, path, content = data.get("name"), data.get("path"), data.get("content")
+    try:
+        if not path or path.lower() == "escritorio":
+            path = os.path.join(os.path.expanduser("~"), "Desktop")
+        full_path = os.path.join(path, name)
+        if not os.path.exists(full_path):
+            os.makedirs(full_path)
+        if content:
+            # Si el contenido es el flag de info, generarlo
+            if content == "info_del_pc":
+                import platform
+                content = f"Reporte de {platform.node()}\nCPU: {platform.processor()}\nOS: {platform.system()}"
+            
+            with open(os.path.join(full_path, "nota.txt"), "w", encoding="utf-8") as f:
+                f.write(content)
+        return {"status": "success", "message": f"Carpeta creada en {path}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     while True:
         try:
-            # Aquí enviaremos actualizaciones en tiempo real al dashboard
-            if brain.logs:
-                await websocket.send_json(brain.logs[-1])
+            if brain.logs: await websocket.send_json(brain.logs[-1])
             await asyncio.sleep(1)
-        except Exception:
-            break
+        except: break
 
 if __name__ == "__main__":
-    brain.add_log("Sistemas de OpenBot inicializados.")
     uvicorn.run(app, host="0.0.0.0", port=8000)

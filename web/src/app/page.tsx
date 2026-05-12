@@ -45,8 +45,8 @@ import {
 
 const API_BASE = "http://localhost:8000";
 
-export default function OpenClawDashboard() {
-  const [activeTab, setActiveTab] = useState<'chat' | 'settings'>('chat');
+export default function OpenBotDashboard() {
+  const [activeTab, setActiveTab] = useState<'chat' | 'agents' | 'settings'>('chat');
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -70,6 +70,7 @@ export default function OpenClawDashboard() {
   const [isSaving, setIsSaving] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [recognition, setRecognition] = useState<any>(null);
+  const fullTranscriptRef = useRef("");
   
   // Referencias para que el reconocimiento de voz siempre tenga los valores actualizados
   const aiModeRef = useRef(aiMode);
@@ -85,6 +86,11 @@ export default function OpenClawDashboard() {
   useEffect(() => { cloudApiKeyRef.current = cloudApiKey; }, [cloudApiKey]);
 
   const [audioOutputs, setAudioOutputs] = useState<any[]>([]);
+  const [agents, setAgents] = useState<any>({});
+  const [activeAgent, setActiveAgent] = useState("");
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentRole, setNewAgentRole] = useState("");
+  const [newAgentInstructions, setNewAgentInstructions] = useState("");
   const [selectedOutput, setSelectedOutput] = useState<string | number>("");
   const [audioInputs, setAudioInputs] = useState<any[]>([]);
   const [selectedInput, setSelectedInput] = useState<string | number>("");
@@ -151,7 +157,18 @@ export default function OpenClawDashboard() {
     if (!isVoiceEnabled) return;
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
+      
+      // Limpiar markdown para que la voz no pronuncie "asterisco", etc.
+      const cleanText = text
+        .replace(/\*\*/g, "") // Negritas
+        .replace(/\*/g, "")   // Cursivas
+        .replace(/#/g, "")    // Títulos
+        .replace(/`/g, "")    // Código
+        .replace(/\[|\]/g, "") // Corchetes
+        .replace(/\(|\)/g, "") // Paréntesis (opcional, pero ayuda a la fluidez)
+        .trim();
+
+      const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.lang = 'es-ES';
       utterance.onstart = () => setIsSpeaking(true);
       utterance.onend = () => setIsSpeaking(false);
@@ -184,19 +201,23 @@ export default function OpenClawDashboard() {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (SpeechRecognition) {
         const rec = new SpeechRecognition();
-        rec.continuous = false;
-        rec.interimResults = false;
+        rec.continuous = true;
+        rec.interimResults = true;
         rec.lang = 'es-ES';
         
         rec.onresult = (event: any) => {
-          const transcript = event.results[0][0].transcript;
-          if (transcript && transcript.trim().length > 0) {
-            handleSend(transcript.trim());
+          let final = "";
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              final += event.results[i][0].transcript + " ";
+            }
           }
+          fullTranscriptRef.current += final;
         };
         
         rec.onend = () => {
-          setIsRecording(false);
+          // No hacemos nada aquí para que no se detenga solo, 
+          // solo se detendrá cuando el usuario llame a recognition.stop()
         };
 
         rec.onerror = (event: any) => {
@@ -234,6 +255,69 @@ export default function OpenClawDashboard() {
   useEffect(() => { localStorage.setItem('openbot_localUrl', localUrl); }, [localUrl]);
   useEffect(() => { localStorage.setItem('openbot_selectedOutput', String(selectedOutput)); }, [selectedOutput]);
 
+  const fetchAgents = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/agents`);
+      const data = await res.json();
+      setAgents(data.agents);
+      setActiveAgent(data.active);
+    } catch (err) {
+      console.error("Error cargando agentes:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchAgents();
+  }, []);
+
+  const handleCreateAgent = async () => {
+    if (!newAgentName || !newAgentInstructions) return;
+    try {
+      const res = await fetch(`${API_BASE}/agents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newAgentName,
+          role: newAgentRole,
+          instructions: newAgentInstructions
+        })
+      });
+      if (res.ok) {
+        setNewAgentName("");
+        setNewAgentRole("");
+        setNewAgentInstructions("");
+        fetchAgents();
+      }
+    } catch (err) {
+      console.error("Error creando agente:", err);
+    }
+  };
+
+  const handleActivateAgent = async (name: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/agents/activate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      if (res.ok) {
+        fetchAgents();
+        handleNewSession();
+      }
+    } catch (err) {
+      console.error("Error activando agente:", err);
+    }
+  };
+
+  const handleDeleteAgent = async (name: string) => {
+    try {
+      await fetch(`${API_BASE}/agents/${name}`, { method: 'DELETE' });
+      fetchAgents();
+    } catch (err) {
+      console.error("Error eliminando agente:", err);
+    }
+  };
+
   const stopSpeaking = () => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -253,19 +337,150 @@ export default function OpenClawDashboard() {
     }, 1200);
   };
 
+  const addMessage = (role: 'user' | 'assistant', content: string) => {
+    const newMessage = { 
+      role, 
+      content, 
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+    };
+    setMessages(prev => [...prev, newMessage]);
+  };
+
+  const processCommands = (text: string): boolean => {
+    const lowerText = text.toLowerCase().trim();
+    
+    // Comandos de Voz
+    if (lowerText.includes("activa la voz") || lowerText.includes("activar voz") || lowerText.includes("pon la voz")) {
+      setIsVoiceEnabled(true);
+      addMessage('assistant', "¡Entendido! He activado mi sistema de voz.");
+      speak("¡Entendido! He activado mi sistema de voz.");
+      return true;
+    }
+    if (lowerText.includes("desactiva la voz") || lowerText.includes("desactivar voz") || lowerText.includes("quitar la voz") || lowerText.includes("cállate")) {
+      setIsVoiceEnabled(false);
+      stopSpeaking();
+      addMessage('assistant', "Voz desactivada. Seguiré respondiendo solo por texto.");
+      return true;
+    }
+
+    // Comandos de Modo IA
+    if (lowerText.includes("modo local") || lowerText.includes("usa ollama") || lowerText.includes("pon ia local")) {
+      setAiMode('local');
+      addMessage('assistant', "Cambiando a Inteligencia Local (Ollama).");
+      speak("Cambiando a Inteligencia Local.");
+      return true;
+    }
+    if (lowerText.includes("modo nube") || lowerText.includes("usa groq") || lowerText.includes("pon ia nube")) {
+      setAiMode('cloud');
+      addMessage('assistant', "Cambiando a Inteligencia en la Nube (Groq).");
+      speak("Cambiando a Inteligencia en la Nube.");
+      return true;
+    }
+
+    // Comandos de Agentes
+    if (lowerText.includes("cambia al agente") || lowerText.includes("usa el agente") || lowerText.includes("activa al agente")) {
+      // Intentar extraer el nombre del agente
+      const parts = lowerText.split("agente");
+      if (parts.length > 1) {
+        const targetName = parts[1].trim();
+        // Buscar coincidencia en la lista de agentes (ignorando mayúsculas/minúsculas)
+        const foundName = Object.keys(agents).find(name => name.toLowerCase() === targetName);
+        if (foundName) {
+          handleActivateAgent(foundName);
+          addMessage('assistant', `Cambiando identidad al agente: ${foundName}`);
+          speak(`Cambiando identidad al agente ${foundName}`);
+          return true;
+        }
+      }
+    }
+
+    // Comando de Hardware / Componentes
+    if (lowerText.includes("componentes") || lowerText.includes("hardware") || lowerText.includes("dime mi pc")) {
+      const fetchSystemInfo = async () => {
+        try {
+          const res = await fetch(`${API_BASE}/system-info`);
+          const data = await res.json();
+          if (data.info) {
+            addMessage('assistant', data.info);
+            speak(data.info);
+          }
+        } catch (err) {
+          addMessage('assistant', "Lo siento, no pude acceder a la información de tu sistema.");
+        }
+      };
+      fetchSystemInfo();
+      return true;
+    }
+
+    // Comando Universal de Creación de Carpetas
+    if (lowerText.includes("crea una carpeta") || lowerText.includes("crear carpeta")) {
+      const createFolder = async () => {
+        let name = "Nueva Carpeta";
+        let path = "escritorio";
+        let content = "";
+
+        // Intento de extracción por lenguaje natural (Súper Robusto)
+        if (lowerText.includes(" en ")) {
+          const parts = lowerText.split(" en ");
+          // "crea una carpeta [Nombre] en [Ruta]"
+          name = parts[0].split("carpeta")[1]?.replace(/llamada|con nombre/g, "").trim() || "Nueva Carpeta";
+          path = parts[1].split(" y pon")[0].trim();
+        } else {
+          // "crea una carpeta [Nombre]" -> Por defecto en Escritorio
+          name = lowerText.split("carpeta")[1]?.replace(/llamada|con nombre/g, "").trim() || "Nueva Carpeta";
+          path = "escritorio";
+        }
+        
+        // Limpiar el nombre de puntos finales o espacios extra
+        name = name.replace(/\.$/, "").trim();
+        if (!name) name = "Nueva Carpeta";
+
+        if (lowerText.includes("y pon") || lowerText.includes("con la info")) {
+          content = "info_del_pc";
+        }
+
+        try {
+          const res = await fetch(`${API_BASE}/create-folder-anywhere`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, path, content })
+          });
+          const data = await res.json();
+          if (data.status === "success") {
+            addMessage('assistant', data.message);
+            speak(data.message);
+          } else {
+            addMessage('assistant', data.error);
+            speak(data.error);
+          }
+        } catch (err) {
+          addMessage('assistant', "Error de conexión al crear la carpeta.");
+        }
+      };
+      createFolder();
+      return true;
+    }
+
+    return false; // No es un comando, continuar con el chat normal
+  };
+
   const handleSend = async (textOverride?: string) => {
-    const text = textOverride || inputText;
-    if (!text.trim() || isSending) return;
-    const userMsg = { role: 'user', content: text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
-    setMessages(prev => [...prev, userMsg]);
+    const message = textOverride || inputText;
+    if (!message.trim() || isSending) return;
+
     setInputText("");
+    addMessage('user', message);
+
+    // Revisar si es un comando antes de enviar a la IA
+    if (processCommands(message)) return;
+
     setIsSending(true);
     try {
       const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          message: text,
+          message: message,
           mode: aiModeRef.current,
           provider: localProviderRef.current,
           url: localUrlRef.current,
@@ -275,7 +490,7 @@ export default function OpenClawDashboard() {
       });
       const data = await res.json();
       if (data.response) {
-        setMessages(prev => [...prev, { role: 'ai', content: data.response, time: data.time }]);
+        addMessage('assistant', data.response);
         speak(data.response);
       }
     } catch (error) { console.error("Error al enviar mensaje:", error); }
@@ -286,6 +501,7 @@ export default function OpenClawDashboard() {
     if (!isRecording) {
       if (recognition) {
         try {
+          fullTranscriptRef.current = ""; // Limpiar antes de empezar
           recognition.start();
           setIsRecording(true);
         } catch (err) {
@@ -298,6 +514,13 @@ export default function OpenClawDashboard() {
       if (recognition) {
         recognition.stop();
         setIsRecording(false);
+        // Esperar un momento a que terminen de llegar los últimos resultados
+        setTimeout(() => {
+          if (fullTranscriptRef.current.trim().length > 0) {
+            handleSend(fullTranscriptRef.current.trim());
+            fullTranscriptRef.current = "";
+          }
+        }, 300);
       }
     }
   };
@@ -322,6 +545,7 @@ export default function OpenClawDashboard() {
           <SidebarSection title="Principal">
             <SidebarItem icon={<LayoutDashboard size={18} />} label="Dashboard" onClick={() => setActiveTab('chat')} />
             <SidebarItem icon={<MessageSquare size={18} />} label="Chat de IA" active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} />
+            <SidebarItem icon={<Layers size={18} />} label="Gestión de Agentes" active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
             <SidebarItem icon={<Clock size={18} />} label="Historial" />
           </SidebarSection>
           
@@ -379,6 +603,11 @@ export default function OpenClawDashboard() {
 
               {/* Status Indicator */}
               <div className={`w-2 h-2 rounded-full transition-all duration-500 ${aiMode === 'local' ? (isLocalConnected ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-red-500') : (isCloudConnected ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-red-500')}`} />
+
+              <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-full border border-white/10">
+                <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">ACTIVO</span>
+                <span className="text-[10px] font-bold text-white uppercase tracking-widest">{activeAgent}</span>
+              </div>
 
               <div className="w-[1px] h-4 bg-white/10 mx-1" />
 
@@ -498,6 +727,120 @@ export default function OpenClawDashboard() {
             <div className="flex justify-center mt-4 gap-6 opacity-30 select-none">
               <span className="text-[10px] font-bold text-gray-500 flex items-center gap-2"><Network size={10} /> Latencia: 42ms</span>
               <span className="text-[10px] font-bold text-gray-500 flex items-center gap-2"><Cpu size={10} /> Load: 12%</span>
+            </div>
+          </div>
+        ) : activeTab === 'agents' ? (
+          <div className="flex-1 p-12 overflow-y-auto custom-scrollbar">
+            <div className="max-w-5xl mx-auto space-y-12">
+              <header className="flex flex-col gap-3">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-red-600/20 rounded-2xl text-red-500 border border-red-500/20 shadow-inner">
+                    <Layers size={24} />
+                  </div>
+                  <h2 className="text-4xl font-black uppercase tracking-tighter text-white">Gestión de Agentes</h2>
+                </div>
+                <p className="text-sm font-bold text-gray-500 tracking-[0.2em] uppercase ml-1">Diseña y despliega personalidades de IA a medida</p>
+              </header>
+
+              {/* Formulario Crear Agente */}
+              <div className="bg-[#111] border border-white/10 rounded-[2.5rem] p-10 space-y-8 shadow-2xl relative overflow-hidden group">
+                <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-10 transition-all duration-700">
+                  <Cpu size={180} />
+                </div>
+                
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 relative">
+                  <div className="space-y-3">
+                    <label className="text-[10px] font-black text-gray-500 uppercase tracking-[2px] ml-1 flex items-center gap-2">
+                      <Brain size={14} /> Nombre del Agente
+                    </label>
+                    <input 
+                      type="text" 
+                      placeholder="Ej: Programador Python"
+                      value={newAgentName}
+                      onChange={(e) => setNewAgentName(e.target.value)}
+                      className="w-full bg-black/60 border border-white/5 rounded-2xl px-6 py-4 text-sm text-white outline-none focus:border-red-500/50 transition-all placeholder:text-gray-700 font-bold"
+                    />
+                  </div>
+                  <div className="space-y-3">
+                    <label className="text-[10px] font-black text-gray-500 uppercase tracking-[2px] ml-1 flex items-center gap-2">
+                      <Zap size={14} /> Rol / Especialidad
+                    </label>
+                    <input 
+                      type="text" 
+                      placeholder="Ej: Senior Developer"
+                      value={newAgentRole}
+                      onChange={(e) => setNewAgentRole(e.target.value)}
+                      className="w-full bg-black/60 border border-white/5 rounded-2xl px-6 py-4 text-sm text-white outline-none focus:border-red-500/50 transition-all placeholder:text-gray-700 font-bold"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-3 relative">
+                  <label className="text-[10px] font-black text-gray-500 uppercase tracking-[2px] ml-1 flex items-center gap-2">
+                    <Settings size={14} /> Instrucciones de Sistema (System Prompt)
+                  </label>
+                  <textarea 
+                    placeholder="Describe detalladamente cómo debe comportarse, qué tono usar y cuáles son sus objetivos principales..."
+                    value={newAgentInstructions}
+                    onChange={(e) => setNewAgentInstructions(e.target.value)}
+                    className="w-full bg-black/60 border border-white/5 rounded-2xl px-6 py-5 text-sm text-white outline-none focus:border-red-500/50 transition-all placeholder:text-gray-700 font-bold min-h-[160px] resize-none leading-relaxed"
+                  />
+                </div>
+
+                <button 
+                  onClick={handleCreateAgent}
+                  className="w-full py-5 bg-gradient-to-r from-red-600 to-red-800 hover:from-red-500 hover:to-red-700 rounded-2xl text-xs font-black uppercase tracking-[0.4em] text-white transition-all border border-white/10 hover:border-white shadow-2xl active:scale-[0.98] flex items-center justify-center gap-4"
+                >
+                  <Cpu size={18} /> Construir Agente Maestro
+                </button>
+              </div>
+
+              {/* Lista de Agentes */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                {Object.entries(agents).map(([name, data]: [string, any]) => (
+                  <div key={name} className={`bg-gradient-to-br from-[#121212] to-[#0a0a0a] border rounded-[2rem] p-8 transition-all duration-500 group relative ${activeAgent === name ? 'border-red-500/50 shadow-[0_0_40px_rgba(220,38,38,0.1)]' : 'border-white/5 hover:border-white/10'}`}>
+                    <div className="flex justify-between items-start mb-6">
+                      <div className="flex items-center gap-4">
+                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border transition-all duration-500 ${activeAgent === name ? 'bg-red-600/20 border-red-500/20 text-red-500 shadow-inner' : 'bg-black border-white/10 text-gray-700 group-hover:text-gray-400'}`}>
+                          <Brain size={24} />
+                        </div>
+                        <div>
+                          <h3 className="text-base font-black text-white uppercase tracking-wider">{name}</h3>
+                          <span className="text-[10px] font-black text-gray-600 uppercase tracking-widest">{data.role}</span>
+                        </div>
+                      </div>
+                      {activeAgent === name && (
+                        <div className="px-3 py-1 bg-red-600/10 border border-red-600/20 rounded-full">
+                          <span className="text-[9px] font-black text-red-500 uppercase tracking-tighter">EN EJECUCIÓN</span>
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="relative mb-8 h-24">
+                      <p className="text-xs text-gray-500 font-bold leading-relaxed line-clamp-4 italic">"{data.instructions}"</p>
+                      <div className="absolute bottom-0 left-0 w-full h-8 bg-gradient-to-t from-[#0a0a0a] to-transparent" />
+                    </div>
+                    
+                    <div className="flex gap-3 relative z-10">
+                      <button 
+                        onClick={() => handleActivateAgent(name)}
+                        className={`flex-1 py-3.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-300 ${activeAgent === name ? 'bg-red-600 text-white cursor-default shadow-lg shadow-red-900/40' : 'bg-white/5 text-gray-500 hover:bg-white/10 hover:text-white border border-white/5'}`}
+                      >
+                        {activeAgent === name ? 'Identidad Cargada' : 'Activar Agente'}
+                      </button>
+                      {name !== "OpenBot Original" && (
+                        <button 
+                          onClick={() => handleDeleteAgent(name)}
+                          className="p-3.5 bg-white/5 hover:bg-red-600/20 text-gray-700 hover:text-red-500 rounded-xl transition-all border border-white/5 hover:border-red-500/20"
+                          title="Eliminar Agente"
+                        >
+                          <RotateCcw size={16} className="rotate-45" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         ) : (
