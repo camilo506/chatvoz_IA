@@ -53,7 +53,7 @@ class OpenBotBrain:
         default = {
             "OpenBot Original": {
                 "role": "Asistente General",
-                "instructions": "Eres OpenBot, un sistema de agentes autónomos avanzado. Tu objetivo es ayudar al usuario a programar, crear agentes y automatizar tareas. Responde siempre en español de forma profesional y segura."
+                "instructions": "Eres OpenBot, un sistema de agentes autónomos avanzado. Tu objetivo es ayudar al usuario a programar, crear agentes y automatizar tareas. Responde siempre en español de forma profesional y segura. Si el usuario pide dibujar o generar una imagen ilustrada, no sustituyas eso con una descripción larga de la escena: indica en una frase breve que debe usar en el mismo chat frases como «dibuja…» o «crea una imagen de…» para que el sistema genere la imagen en el panel."
             }
         }
         self.save_agents_to_file(default)
@@ -98,6 +98,20 @@ class OpenBotBrain:
             else:
                 mime = "image/jpeg"
             return f"data:{mime};base64," + b64.standard_b64encode(raw).decode("ascii")
+
+        def _bytes_to_data_url(raw: bytes):
+            """Igual que leer archivo pero desde memoria: no guarda en disco (solo panel + descarga manual)."""
+            import base64 as b64
+            if raw[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            elif len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                mime = "image/webp"
+            elif raw[:2] == b"\xff\xd8":
+                mime = "image/jpeg"
+            else:
+                mime = "image/jpeg"
+            return f"data:{mime};base64," + b64.standard_b64encode(raw).decode("ascii")
+
         t = text.lower()
         
         # 1. Info del Sistema
@@ -162,35 +176,110 @@ class OpenBotBrain:
             except Exception as e:
                 return f"❌ Error creando PDF: {str(e)}", True, None
         # 3. Generación de Imágenes (txt2img & img2img)
+        # Frases que disparan generación real (no respuesta de texto del LLM).
         img_keywords = [
-            "dibuja",
+            "generame una imagen",
             "genera una imagen",
-            "genera imagen",
-            "pinta",
+            "muéstrame una imagen",
+            "muestrame una imagen",
+            "necesito una imagen",
+            "quiero una imagen",
+            "hazme una imagen",
+            "haz una imagen",
+            "dame una imagen",
+            "creo una imagen",
             "crea una imagen",
             "crea una image",
+            "creo imagen",
             "crea imagen",
+            "generame imagen",
+            "genera imagen",
+            "haz un dibujo",
+            "hazme un dibujo",
+            "dibujame",
+            "dibújame",
+            "dibuja",
+            "pintame",
+            "pinta",
+            "ilustra",
+            "diseña una imagen",
+            "diseña imagen",
             "edita",
             "modifica",
             "transforma",
             "cambia",
         ]
-        if any(keyword in t for keyword in img_keywords):
+
+        def _message_requests_image(low: str) -> bool:
+            if any(kw in low for kw in img_keywords):
+                return True
+            pad = " " + " ".join(low.split()) + " "
+            has_subject = (
+                " una imagen " in pad
+                or " imagen de " in pad
+                or " imagen del " in pad
+                or " un dibujo " in pad
+                or " una ilustración " in pad
+                or " una ilustracion " in pad
+                or " ilustración de " in pad
+                or " ilustracion de " in pad
+            )
+            if not has_subject:
+                return False
+            markers = (
+                " dibuja",
+                " dibujame",
+                " genera",
+                " generame",
+                " crea ",
+                " creo ",
+                " crees",
+                " creas",
+                " haz ",
+                " hazme",
+                " haz una",
+                " pinta",
+                " ilustra",
+                " diseña",
+                " disena",
+                " muestrame",
+                " muéstrame",
+                " dame ",
+                " quiero ",
+                " necesito ",
+            )
+            return any(m in pad for m in markers)
+
+        if _message_requests_image(t):
             import os
-            import time
             import urllib.parse
             import urllib.request
             import requests
-            
+
             prompt = t
-            for kw in img_keywords:
-                prompt = prompt.replace(kw, "")
+            for kw in sorted(img_keywords, key=len, reverse=True):
+                prompt = prompt.replace(kw, " ")
+            for noise in (
+                "si te pido",
+                "te pido que",
+                "te pido",
+                "por favor",
+                "quiero que",
+                "quisiera que",
+                "me gustaría que",
+                "me gustaria que",
+                "podrías",
+                "podrias",
+                "puedes",
+            ):
+                prompt = prompt.replace(noise, " ")
             prompt = prompt.replace("esta imagen", "").replace("la foto", "").strip()
+            while "  " in prompt:
+                prompt = prompt.replace("  ", " ")
             
             if len(prompt) < 3: prompt = "cyberpunk city landscape"
-            
-            path = os.path.join(OUTPUT_DIR, f"Imagen_OpenBot_{int(time.time())}.jpg")
-            
+
+            # Imágenes solo para el chat (data URL): no escribimos en OUTPUT_DIR; el usuario descarga con "Descargar" en el panel.
             # Si hay una imagen adjunta, forzamos modo local (Img2Img) porque Pollinations no lo soporta de forma simple.
             is_img2img = image_base64 is not None
             
@@ -240,7 +329,14 @@ class OpenBotBrain:
                                     True,
                                     None,
                                 )
-                            data = r.json()
+                            try:
+                                data = r.json()
+                            except ValueError:
+                                return (
+                                    "❌ Pollinations devolvió un cuerpo que no es JSON válido.",
+                                    True,
+                                    None,
+                                )
                             if isinstance(data, dict) and data.get("success") is False:
                                 err = data.get("error") or {}
                                 msg = err.get("message") if isinstance(err, dict) else str(data)
@@ -248,8 +344,9 @@ class OpenBotBrain:
                             row = (data.get("data") or [None])[0]
                             if not row:
                                 return ("❌ Pollinations no devolvió ninguna imagen.", True, None)
-                            if row.get("b64_json"):
-                                raw = b64_mod.standard_b64decode(row["b64_json"])
+                            b64_field = row.get("b64_json") or row.get("base64")
+                            if b64_field:
+                                raw = b64_mod.standard_b64decode(b64_field)
                             elif row.get("url"):
                                 r2 = img_session.get(
                                     row["url"],
@@ -264,11 +361,13 @@ class OpenBotBrain:
                                     )
                                 raw = r2.content
                             else:
-                                return ("❌ Respuesta Pollinations sin b64_json ni url.", True, None)
+                                return (
+                                    "❌ Respuesta Pollinations sin b64_json/base64 ni url.",
+                                    True,
+                                    None,
+                                )
                             if len(raw) < 500:
                                 return ("❌ Imagen recibida demasiado pequeña.", True, None)
-                            with open(path, "wb") as f:
-                                f.write(raw)
                         finally:
                             img_session.close()
                     else:
@@ -303,10 +402,7 @@ class OpenBotBrain:
                                 True,
                                 None,
                             )
-                        with open(path, "wb") as f:
-                            f.write(raw)
-
-                    return "", True, _file_to_data_url(path)
+                    return "Imagen generada.", True, _bytes_to_data_url(raw)
                 except Exception as e:
                     return f"❌ Error creando imagen en la nube: {str(e)}", True, None
             else:
@@ -335,14 +431,26 @@ class OpenBotBrain:
                             "height": IMAGE_GEN_SIZE
                         }
                     
-                    response = requests.post(url, json=payload, timeout=20)
+                    response = requests.post(url, json=payload, timeout=120)
                     if response.status_code == 200:
                         import base64
-                        r = response.json()
-                        image_data = base64.b64decode(r['images'][0])
-                        with open(path, 'wb') as f:
-                            f.write(image_data)
-                        return "", True, _file_to_data_url(path)
+                        try:
+                            r = response.json()
+                            b64img = (r.get("images") or [None])[0]
+                            if not b64img:
+                                return (
+                                    "❌ El motor local devolvió JSON sin imágenes (revisa la consola de Forge).",
+                                    True,
+                                    None,
+                                )
+                            image_data = base64.b64decode(b64img)
+                        except (ValueError, KeyError, TypeError) as e:
+                            return (
+                                f"❌ Respuesta local inválida al generar imagen: {e}",
+                                True,
+                                None,
+                            )
+                        return "Imagen generada.", True, _bytes_to_data_url(image_data)
                     else:
                         return f"❌ Error: El motor local respondió con código {response.status_code}.", True, None
                 except requests.exceptions.ConnectionError:
@@ -385,6 +493,45 @@ class OpenBotBrain:
 
 brain = OpenBotBrain()
 
+
+def telegram_send_photo(chat_id, photo_data_url: str, caption=None):
+    """
+    Envía una imagen en formato data URL por la API sendPhoto de Telegram.
+    Retorna (éxito: bool, detalle_error: str).
+    """
+    import base64
+    import io
+    import requests
+
+    if not photo_data_url or "," not in photo_data_url:
+        return False, "data URL inválida"
+    header, b64part = photo_data_url.split(",", 1)
+    mime = "image/png"
+    if "image/jpeg" in header or "image/jpg" in header:
+        mime = "image/jpeg"
+    elif "image/webp" in header:
+        mime = "image/webp"
+    try:
+        raw = base64.standard_b64decode(b64part)
+    except Exception as e:
+        return False, f"base64: {e}"
+    buf = io.BytesIO(raw)
+    buf.seek(0)
+    ext = mime.split("/")[-1]
+    send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    cap = (caption or "").strip()
+    if len(cap) > 1024:
+        cap = cap[:1021] + "..."
+    data = {"chat_id": str(chat_id)}
+    if cap:
+        data["caption"] = cap
+    files = {"photo": (f"openbot.{ext}", buf, mime)}
+    r = requests.post(send_url, data=data, files=files, timeout=120)
+    if not r.ok:
+        return False, (r.text or "")[:300]
+    return True, ""
+
+
 # --- LÓGICA DE TELEGRAM ---
 def telegram_worker():
     import requests
@@ -412,11 +559,26 @@ def telegram_worker():
 
                         brain.add_log(f"Telegram [{chat_id}]: {text}", "user")
                         
-                        # 1. Ver si es comando
-                        cmd_res, is_cmd, _ = brain.process_command(text, mode="cloud")
+                        cmd_res, is_cmd, cmd_image = brain.process_command(text, mode="cloud")
                         
                         if is_cmd:
                             final_res = cmd_res
+                            if cmd_image:
+                                ok, err = telegram_send_photo(chat_id, cmd_image, final_res)
+                                if not ok:
+                                    brain.add_log(f"Telegram sendPhoto falló: {err}", "error")
+                                    fallback = (final_res or "Imagen generada.") + f"\n\n❌ No se pudo enviar la foto por Telegram: {err}"
+                                    requests.post(
+                                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                        json={"chat_id": chat_id, "text": fallback[:4090]},
+                                        timeout=60,
+                                    )
+                            else:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                    json={"chat_id": chat_id, "text": final_res or "Listo."},
+                                    timeout=60,
+                                )
                         else:
                             # 2. Si no es comando, usar IA (Nube por defecto para Telegram)
                             try:
@@ -432,10 +594,12 @@ def telegram_worker():
                                 final_res = completion.choices[0].message.content
                             except Exception as e:
                                 final_res = f"Error IA: {str(e)}"
-                        
-                        # Enviar respuesta a Telegram
-                        send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                        requests.post(send_url, json={"chat_id": chat_id, "text": final_res})
+                            
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": final_res},
+                                timeout=60,
+                            )
                         
             time.sleep(1)
         except Exception as e:

@@ -44,21 +44,89 @@ import {
 
 const API_BASE = "http://localhost:8000";
 
+const LS_KB_SNIPPETS = "openbot_knowledge_snippets";
+const LS_KB_USE = "openbot_knowledge_use_in_chat";
+const LS_KB_INJECT = "openbot_knowledge_inject";
+
+type MainTab =
+  | "dashboard"
+  | "chat"
+  | "agents"
+  | "settings"
+  | "localModels"
+  | "cloudServices"
+  | "knowledge";
+
+type KbSnippet = { id: string; title: string; body: string; created: string };
+
 function looksLikeImageRequest(text: string): boolean {
-  const t = text.toLowerCase();
+  const t = text.toLowerCase().trim();
   const hints = [
-    'dibuja',
+    'generame una imagen',
     'genera una imagen',
-    'genera imagen',
-    'pinta',
+    'muéstrame una imagen',
+    'muestrame una imagen',
+    'necesito una imagen',
+    'quiero una imagen',
+    'hazme una imagen',
+    'haz una imagen',
+    'dame una imagen',
+    'creo una imagen',
     'crea una imagen',
-    'crea una image',
+    'creo imagen',
     'crea imagen',
+    'crea una image',
+    'generame imagen',
+    'genera imagen',
+    'haz un dibujo',
+    'hazme un dibujo',
+    'dibujame',
+    'dibújame',
+    'dibuja',
+    'pintame',
+    'pinta',
     'ilustra',
     'ilustración',
     'ilustracion',
+    'diseña una imagen',
+    'diseña imagen',
   ];
-  return hints.some((h) => t.includes(h));
+  if (hints.some((h) => t.includes(h))) return true;
+
+  const pad = ` ${t.replace(/\s+/g, ' ')} `;
+  const hasSubject =
+    pad.includes(' una imagen ') ||
+    pad.includes(' imagen de ') ||
+    pad.includes(' imagen del ') ||
+    pad.includes(' un dibujo ') ||
+    pad.includes(' una ilustración ') ||
+    pad.includes(' una ilustracion ') ||
+    pad.includes(' ilustración de ') ||
+    pad.includes(' ilustracion de ');
+  if (!hasSubject) return false;
+  const markers = [
+    ' dibuja',
+    ' dibujame',
+    ' genera',
+    ' generame',
+    ' crea ',
+    ' creo ',
+    ' crees',
+    ' creas',
+    ' haz ',
+    ' hazme',
+    ' haz una',
+    ' pinta',
+    ' ilustra',
+    ' diseña',
+    ' disena',
+    ' muestrame',
+    ' muéstrame',
+    ' dame ',
+    ' quiero ',
+    ' necesito ',
+  ];
+  return markers.some((m) => pad.includes(m));
 }
 
 /** Frases cortas para la voz al terminar una imagen (una al azar, suena menos robótico). */
@@ -112,8 +180,27 @@ const CHAT_ASSISTANT_IMAGE_FRAME_CLASS =
 const CHAT_ASSISTANT_IMAGE_IMG_CLASS =
   'mx-auto block h-auto w-full max-h-[min(48vh,420px)] object-contain sm:max-h-[min(52vh,480px)]';
 
+/** Marca de agua del logo OpenBot (ícono Cpu), mismo detalle que en Gestión de Agentes */
+function OpenBotWatermark({
+  size = 180,
+  className = "p-8 opacity-5 group-hover:opacity-10",
+}: {
+  size?: number;
+  /** p.ej. `p-4 opacity-[0.04] group-hover:opacity-[0.09]` en tarjetas pequeñas */
+  className?: string;
+}) {
+  return (
+    <div
+      className={`pointer-events-none absolute right-0 top-0 z-0 transition-opacity duration-700 ${className}`}
+      aria-hidden
+    >
+      <Cpu size={size} className="text-red-600" />
+    </div>
+  );
+}
+
 export default function OpenBotDashboard() {
-  const [activeTab, setActiveTab] = useState<'chat' | 'agents' | 'settings'>('chat');
+  const [activeTab, setActiveTab] = useState<MainTab>("chat");
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -165,6 +252,110 @@ export default function OpenBotDashboard() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
+
+  const [dashboardApi, setDashboardApi] = useState<{ ok: boolean; name: string } | null>(null);
+  const [dashboardApiAt, setDashboardApiAt] = useState('');
+  const [dashboardSystem, setDashboardSystem] = useState('');
+
+  const [ollamaModels, setOllamaModels] = useState<{ name: string; size?: number; modified_at?: string }[]>([]);
+  const [ollamaModelsError, setOllamaModelsError] = useState("");
+  const [ollamaModelsLoading, setOllamaModelsLoading] = useState(false);
+
+  const [kbSnippets, setKbSnippets] = useState<KbSnippet[]>(() => {
+    try {
+      const raw = typeof window !== "undefined" ? localStorage.getItem(LS_KB_SNIPPETS) : null;
+      if (raw) return JSON.parse(raw) as KbSnippet[];
+    } catch {
+      /* ignore */
+    }
+    return [];
+  });
+  const [kbUseInChat, setKbUseInChat] = useState(() =>
+    typeof window !== "undefined" ? localStorage.getItem(LS_KB_USE) === "1" : false
+  );
+  const [kbInjectMap, setKbInjectMap] = useState<Record<string, boolean>>(() => {
+    try {
+      const inj = typeof window !== "undefined" ? localStorage.getItem(LS_KB_INJECT) : null;
+      if (inj) return JSON.parse(inj) as Record<string, boolean>;
+    } catch {
+      /* ignore */
+    }
+    return {};
+  });
+  const [kbDraftTitle, setKbDraftTitle] = useState("");
+  const [kbDraftBody, setKbDraftBody] = useState("");
+
+  const loadDashboardData = async () => {
+    setDashboardApiAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+    try {
+      const res = await fetch(`${API_BASE}/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setDashboardApi({ ok: true, name: typeof data.name === 'string' ? data.name : 'OpenBot' });
+      } else {
+        setDashboardApi({ ok: false, name: '' });
+      }
+    } catch {
+      setDashboardApi({ ok: false, name: '' });
+    }
+    try {
+      const res = await fetch(`${API_BASE}/system-info`);
+      const data = await res.json();
+      setDashboardSystem(typeof data.info === 'string' ? data.info.replace(/\*\*/g, '') : '');
+    } catch {
+      setDashboardSystem('No se pudo cargar la información del sistema.');
+    }
+    fetchAgents();
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'dashboard') return;
+    loadDashboardData();
+    const id = setInterval(loadDashboardData, 12000);
+    return () => clearInterval(id);
+  }, [activeTab]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KB_SNIPPETS, JSON.stringify(kbSnippets));
+    } catch {
+      /* ignore */
+    }
+  }, [kbSnippets]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_KB_USE, kbUseInChat ? "1" : "0");
+  }, [kbUseInChat]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KB_INJECT, JSON.stringify(kbInjectMap));
+    } catch {
+      /* ignore */
+    }
+  }, [kbInjectMap]);
+
+  const fetchOllamaModels = async () => {
+    setOllamaModelsLoading(true);
+    setOllamaModelsError("");
+    try {
+      const base = localUrl.replace(/\/$/, "");
+      const res = await fetch(`${base}/api/tags`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setOllamaModels(Array.isArray(data.models) ? data.models : []);
+    } catch (e: unknown) {
+      setOllamaModels([]);
+      setOllamaModelsError(e instanceof Error ? e.message : "Sin conexión");
+    } finally {
+      setOllamaModelsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab !== "localModels") return;
+    fetchOllamaModels();
+  }, [activeTab, localUrl]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -263,7 +454,8 @@ export default function OpenBotDashboard() {
     const checkLocal = async () => {
       if (aiMode === 'local') {
         try {
-          const res = await fetch('http://localhost:11434/api/tags');
+          const base = localUrl.replace(/\/$/, '');
+          const res = await fetch(`${base}/api/tags`);
           setIsLocalConnected(res.ok);
         } catch {
           setIsLocalConnected(false);
@@ -273,7 +465,7 @@ export default function OpenBotDashboard() {
     checkLocal();
     const interval = setInterval(checkLocal, 5000);
     return () => clearInterval(interval);
-  }, [aiMode]);
+  }, [aiMode, localUrl]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -551,6 +743,16 @@ export default function OpenBotDashboard() {
     return false; // No es un comando, continuar con el chat normal
   };
 
+  const buildKnowledgeAugmentedMessage = (userText: string) => {
+    if (!kbUseInChat || !kbSnippets.length) return userText;
+    const selected = kbSnippets.filter((s) => kbInjectMap[s.id]);
+    if (!selected.length) return userText;
+    let block = selected.map((s) => `### ${s.title}\n${s.body}`).join("\n\n");
+    const max = 6000;
+    if (block.length > max) block = `${block.slice(0, max)}\n[…truncado]`;
+    return `${userText}\n\n---\nContexto interno (base de conocimiento; úsalo solo si es relevante):\n${block}`;
+  };
+
   const handleSend = async (textOverride?: string) => {
     const message = textOverride || inputText;
     if (!message.trim() || isSending) return;
@@ -563,11 +765,13 @@ export default function OpenBotDashboard() {
 
     setIsSending(true);
     try {
+      const outboundMessage = buildKnowledgeAugmentedMessage(message);
       const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(240_000),
         body: JSON.stringify({ 
-          message: message,
+          message: outboundMessage,
           mode: aiModeRef.current,
           provider: localProviderRef.current,
           url: localUrlRef.current,
@@ -593,7 +797,18 @@ export default function OpenBotDashboard() {
           setAttachedImage(null);
         }
       }
-    } catch (error) { console.error("Error al enviar mensaje:", error); }
+    } catch (error) {
+      console.error("Error al enviar mensaje:", error);
+      const isTimeout =
+        error instanceof DOMException &&
+        (error.name === "TimeoutError" || error.name === "AbortError");
+      if (isTimeout) {
+        addMessage(
+          "assistant",
+          "⚠️ La petición tardó demasiado (p. ej. generando una imagen a 1024px). Reintenta o revisa Forge/Pollinations y el servidor Python."
+        );
+      }
+    }
     finally { setIsSending(false); }
   };
 
@@ -643,16 +858,16 @@ export default function OpenBotDashboard() {
 
         <div className="flex-1 px-3 space-y-6 overflow-y-auto custom-scrollbar">
           <SidebarSection title="Principal">
-            <SidebarItem icon={<LayoutDashboard size={18} />} label="Dashboard" onClick={() => setActiveTab('chat')} />
+            <SidebarItem icon={<LayoutDashboard size={18} />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
             <SidebarItem icon={<MessageSquare size={18} />} label="Chat de IA" active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} />
             <SidebarItem icon={<Layers size={18} />} label="Gestión de Agentes" active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
             <SidebarItem icon={<Clock size={18} />} label="Historial" />
           </SidebarSection>
           
           <SidebarSection title="IA & Modelos">
-            <SidebarItem icon={<Brain size={18} />} label="Modelos Locales" />
-            <SidebarItem icon={<Cloud size={18} />} label="Servicios Cloud" />
-            <SidebarItem icon={<Database size={18} />} label="Base de Conocimiento" />
+            <SidebarItem icon={<Brain size={18} />} label="Modelos Locales" active={activeTab === 'localModels'} onClick={() => setActiveTab('localModels')} />
+            <SidebarItem icon={<Cloud size={18} />} label="Servicios Cloud" active={activeTab === 'cloudServices'} onClick={() => setActiveTab('cloudServices')} />
+            <SidebarItem icon={<Database size={18} />} label="Base de Conocimiento" active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} />
           </SidebarSection>
 
           <SidebarSection title="Sistema">
@@ -681,7 +896,15 @@ export default function OpenBotDashboard() {
       <main className="flex-1 flex flex-col overflow-hidden relative">
         <header className="h-16 border-b border-white/5 flex items-center justify-between px-8 bg-[#0d0d0d]/80 backdrop-blur-md z-10">
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-bold text-gray-400 capitalize">{activeTab}</h2>
+            <h2 className="text-sm font-bold text-gray-400">
+              {activeTab === 'dashboard' && 'Dashboard'}
+              {activeTab === 'chat' && 'Chat de IA'}
+              {activeTab === 'agents' && 'Gestión de Agentes'}
+              {activeTab === 'settings' && 'Configuración'}
+              {activeTab === 'localModels' && 'Modelos locales'}
+              {activeTab === 'cloudServices' && 'Servicios cloud'}
+              {activeTab === 'knowledge' && 'Base de conocimiento'}
+            </h2>
             <span className="text-gray-700">/</span>
             <span className="text-sm font-bold text-white">Sesión Actual</span>
           </div>
@@ -749,9 +972,156 @@ export default function OpenBotDashboard() {
           </div>
         </header>
 
-        {activeTab === 'chat' ? (
-          <div className="flex-1 flex flex-col p-8 overflow-hidden">
-            <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-8 pr-4 mb-6 custom-scrollbar scroll-smooth">
+        {activeTab === 'dashboard' ? (
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-8 relative group min-h-0">
+            <OpenBotWatermark size={188} className="p-6 opacity-[0.06] group-hover:opacity-[0.11]" />
+            <div className="max-w-6xl mx-auto space-y-8 relative z-[1]">
+              <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+                <div>
+                  <h1 className="text-3xl font-black text-white uppercase tracking-tight">Panel general</h1>
+                  <p className="text-sm text-gray-500 mt-2 font-bold tracking-wide">
+                    Estado del núcleo OpenBot, conexiones y atajos a la sesión actual.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadDashboardData()}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-[11px] font-black uppercase tracking-widest text-gray-300 hover:bg-white/10 hover:text-white transition-colors shrink-0"
+                >
+                  <RotateCcw size={14} /> Actualizar
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                <div className="rounded-2xl border border-white/10 bg-[#111] p-6 shadow-xl">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">API Python</span>
+                    {dashboardApi?.ok ? (
+                      <CheckCircle2 className="text-green-500" size={20} />
+                    ) : (
+                      <AlertCircle className="text-red-500" size={20} />
+                    )}
+                  </div>
+                  <p className="text-lg font-black text-white">{dashboardApi?.ok ? (dashboardApi.name || 'En línea') : 'Sin conexión'}</p>
+                  <p className="text-[11px] text-gray-500 mt-2 font-mono">{API_BASE}</p>
+                  <p className="text-[10px] text-gray-600 mt-3 uppercase tracking-tighter">Comprobado: {dashboardApiAt || '—'}</p>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-[#111] p-6 shadow-xl">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Modo IA</span>
+                    {aiMode === 'local' ? <Server size={20} className="text-cyan-400" /> : <Cloud size={20} className="text-cyan-400" />}
+                  </div>
+                  <p className="text-lg font-black text-white">{aiMode === 'local' ? 'Local' : 'Nube'}</p>
+                  <p className="text-[11px] text-gray-500 mt-2 font-bold">{aiMode === 'local' ? localProvider : cloudProvider}</p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className={`h-2 w-2 rounded-full ${aiMode === 'local' ? (isLocalConnected ? 'bg-green-500' : 'bg-red-500') : isCloudConnected ? 'bg-green-500' : 'bg-red-500'}`} />
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
+                      {aiMode === 'local' ? (isLocalConnected ? 'Motor local OK' : 'Motor local no responde') : isCloudConnected ? 'Clave Groq lista' : 'Falta clave Groq'}
+                    </span>
+                  </div>
+                  {aiMode === 'local' && (
+                    <p className="text-[10px] text-gray-600 mt-2 font-mono truncate" title={localUrl}>
+                      {localUrl} · {localModel}
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-[#111] p-6 shadow-xl">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Agente</span>
+                    <Users size={20} className="text-gray-500" />
+                  </div>
+                  <p className="text-lg font-black text-white truncate" title={activeAgent}>
+                    {activeAgent || '—'}
+                  </p>
+                  <p className="text-[11px] text-gray-500 mt-2">{Object.keys(agents).length} agente(s) en el sistema</p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('agents')}
+                    className="mt-4 w-full rounded-xl border border-white/10 bg-white/5 py-2.5 text-[10px] font-black uppercase tracking-widest text-gray-300 hover:bg-white/10 hover:text-white transition-colors"
+                  >
+                    Gestionar agentes
+                  </button>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-[#111] p-6 shadow-xl md:col-span-2 xl:col-span-1">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Sesión de chat</span>
+                    <MessageSquare size={20} className="text-gray-500" />
+                  </div>
+                  <p className="text-lg font-black text-white">{messages.length} mensaje(s)</p>
+                  <p className="text-[11px] text-gray-500 mt-2">Incluye la conversación visible en la pestaña Chat.</p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('chat')}
+                    className="mt-4 w-full rounded-xl bg-red-600/90 py-2.5 text-[10px] font-black uppercase tracking-widest text-white hover:bg-red-500 transition-colors border border-red-500/50"
+                  >
+                    Ir al chat
+                  </button>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-[#111] p-6 shadow-xl md:col-span-2">
+                  <div className="flex items-center gap-2 mb-4">
+                    <BarChart3 size={18} className="text-gray-500" />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Imágenes generadas</span>
+                  </div>
+                  <p className="text-sm text-gray-400 leading-relaxed mb-4">
+                    Para generar una imagen real (no solo texto), escribe en el chat frases como{' '}
+                    <span className="text-white font-bold">«dibuja …»</span>, <span className="text-white font-bold">«crea una imagen de …»</span> o{' '}
+                    <span className="text-white font-bold">«creo una imagen de …»</span>. Imágenes en nube usan Pollinations (clave aparte en el servidor); en local hace falta Forge en el puerto 7860.
+                  </p>
+                  {(() => {
+                    const lastImg = [...messages].reverse().find((m) => m.role === 'assistant' && m.image);
+                    if (!lastImg?.image) {
+                      return <p className="text-[11px] text-gray-600 italic">Aún no hay imagen en esta sesión.</p>;
+                    }
+                    return (
+                      <div className="flex flex-col sm:flex-row gap-4 items-start">
+                        <img src={lastImg.image} alt="Última generada" className="h-28 w-auto max-w-[200px] rounded-lg border border-white/10 object-contain bg-black/40" />
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('chat')}
+                          className="text-[10px] font-black uppercase tracking-widest text-red-400 hover:text-red-300"
+                        >
+                          Ver en el chat →
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-[#111] p-6 shadow-xl xl:col-span-3">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Cpu size={18} className="text-gray-500" />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Equipo (servidor Python)</span>
+                  </div>
+                  <div className="text-sm text-gray-400 whitespace-pre-wrap leading-relaxed font-medium">{dashboardSystem || 'Cargando…'}</div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('settings')}
+                  className="rounded-xl border border-white/10 bg-[#151515] px-5 py-3 text-[10px] font-black uppercase tracking-widest text-gray-300 hover:border-white/20 hover:text-white transition-colors"
+                >
+                  Configuración
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void fetch(`${API_BASE}/new-session`, { method: 'POST' }).then(() => setMessages([]))}
+                  className="rounded-xl border border-white/10 bg-[#151515] px-5 py-3 text-[10px] font-black uppercase tracking-widest text-gray-300 hover:border-white/20 hover:text-white transition-colors"
+                >
+                  Nueva sesión (limpiar chat)
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'chat' ? (
+          <div className="flex-1 flex flex-col p-8 overflow-hidden relative group min-h-0">
+            <OpenBotWatermark size={176} className="p-5 opacity-[0.06] group-hover:opacity-[0.11]" />
+            <div ref={scrollRef} className="relative z-[1] flex-1 overflow-y-auto space-y-8 pr-4 mb-6 custom-scrollbar scroll-smooth">
               {messages.length === 0 && (
                 <div className="flex flex-col items-center justify-center h-full opacity-20 select-none">
                   <div className="relative mb-6">
@@ -807,6 +1177,7 @@ export default function OpenBotDashboard() {
                               <a
                                 href={msg.image}
                                 download={`openbot-${msg.time?.replace(/:/g, '-') || 'imagen'}.png`}
+                                title="Descarga la imagen a tu equipo cuando quieras (no se guarda sola)"
                                 className="text-[11px] font-black uppercase tracking-widest px-3 py-2 rounded-xl text-gray-500 hover:text-white border border-transparent hover:border-white/10 transition-colors"
                               >
                                 Descargar
@@ -845,7 +1216,7 @@ export default function OpenBotDashboard() {
                 )}
             </div>
 
-            <div className={CHAT_COMPOSER_CLASS}>
+            <div className={`relative z-[1] ${CHAT_COMPOSER_CLASS}`}>
               {/* Preview de Imagen Adjunta */}
               {attachedImage && (
                 <div className="mb-2 p-3 flex items-center gap-3 bg-black/40 rounded-xl border border-white/5 animate-in slide-in-from-top-2 duration-300">
@@ -926,7 +1297,7 @@ export default function OpenBotDashboard() {
               </div>
             </div>
             
-            <div className="flex justify-center mt-2 gap-6 opacity-30 select-none">
+            <div className="relative z-[1] flex justify-center mt-2 gap-6 opacity-30 select-none">
               <span className="text-[10px] font-bold text-gray-500 flex items-center gap-2"><Network size={10} /> Latencia: 42ms</span>
               <span className="text-[10px] font-bold text-gray-500 flex items-center gap-2"><Cpu size={10} /> Load: 12%</span>
             </div>
@@ -946,10 +1317,7 @@ export default function OpenBotDashboard() {
 
               {/* Formulario Crear Agente */}
               <div className="bg-[#111] border border-white/10 rounded-[2.5rem] p-10 space-y-8 shadow-2xl relative overflow-hidden group">
-                <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-10 transition-all duration-700">
-                  <Cpu size={180} />
-                </div>
-                
+                <OpenBotWatermark />
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 relative">
                   <div className="space-y-3">
                     <label className="text-[10px] font-black text-gray-500 uppercase tracking-[2px] ml-1 flex items-center gap-2">
@@ -1000,8 +1368,9 @@ export default function OpenBotDashboard() {
               {/* Lista de Agentes */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 {Object.entries(agents).map(([name, data]: [string, any]) => (
-                  <div key={name} className={`bg-gradient-to-br from-[#121212] to-[#0a0a0a] border rounded-[2rem] p-8 transition-all duration-500 group relative ${activeAgent === name ? 'border-red-500/50 shadow-[0_0_40px_rgba(220,38,38,0.1)]' : 'border-white/5 hover:border-white/10'}`}>
-                    <div className="flex justify-between items-start mb-6">
+                  <div key={name} className={`group relative overflow-hidden bg-gradient-to-br from-[#121212] to-[#0a0a0a] border rounded-[2rem] p-8 transition-all duration-500 ${activeAgent === name ? 'border-red-500/50 shadow-[0_0_40px_rgba(220,38,38,0.1)]' : 'border-white/5 hover:border-white/10'}`}>
+                    <OpenBotWatermark size={120} className="p-4 opacity-[0.04] group-hover:opacity-[0.09]" />
+                    <div className="relative z-[1] flex justify-between items-start mb-6">
                       <div className="flex items-center gap-4">
                         <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border transition-all duration-500 ${activeAgent === name ? 'bg-red-600/20 border-red-500/20 text-red-500 shadow-inner' : 'bg-black border-white/10 text-gray-700 group-hover:text-gray-400'}`}>
                           <Brain size={24} />
@@ -1018,12 +1387,12 @@ export default function OpenBotDashboard() {
                       )}
                     </div>
                     
-                    <div className="relative mb-8 h-24">
+                    <div className="relative z-[1] mb-8 h-24">
                       <p className="text-xs text-gray-500 font-bold leading-relaxed line-clamp-4 italic">"{data.instructions}"</p>
                       <div className="absolute bottom-0 left-0 w-full h-8 bg-gradient-to-t from-[#0a0a0a] to-transparent" />
                     </div>
                     
-                    <div className="flex gap-3 relative z-10">
+                    <div className="relative z-[1] flex gap-3">
                       <button 
                         onClick={() => handleActivateAgent(name)}
                         className={`flex-1 py-3.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-300 ${activeAgent === name ? 'bg-red-600 text-white cursor-default shadow-lg shadow-red-900/40' : 'bg-white/5 text-gray-500 hover:bg-white/10 hover:text-white border border-white/5'}`}
@@ -1045,8 +1414,10 @@ export default function OpenBotDashboard() {
               </div>
             </div>
           </div>
-        ) : (
-          <div className="flex-1 p-12 overflow-y-auto custom-scrollbar">
+        ) : activeTab === 'settings' ? (
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-12 relative group min-h-0">
+            <OpenBotWatermark size={184} className="p-6 opacity-[0.06] group-hover:opacity-[0.11]" />
+            <div className="relative z-[1]">
             <h1 className="text-3xl font-black text-white mb-2 uppercase tracking-tight">Configuración Central</h1>
             <p className="text-sm text-gray-500 mb-12 font-bold tracking-wide">Gestión de proveedores de inteligencia y conectividad.</p>
 
@@ -1205,8 +1576,199 @@ export default function OpenBotDashboard() {
                 </div>
               </div>
             </div>
+            </div>
           </div>
-        )}
+        ) : activeTab === 'localModels' ? (
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-8 relative group min-h-0">
+            <OpenBotWatermark size={176} className="p-6 opacity-[0.06] group-hover:opacity-[0.11]" />
+            <div className="max-w-4xl mx-auto space-y-8 relative z-[1]">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                  <h1 className="text-3xl font-black text-white uppercase tracking-tight">Modelos locales</h1>
+                  <p className="text-sm text-gray-500 mt-2 font-mono truncate" title={localUrl}>{localUrl}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void fetchOllamaModels()}
+                  className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-[11px] font-black uppercase tracking-widest text-gray-300 hover:bg-white/10 shrink-0"
+                >
+                  <RotateCcw size={14} /> Refrescar
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 font-bold">
+                Lista desde la API compatible con Ollama. El modelo activo del chat se elige aquí o en Configuración.
+              </p>
+              {ollamaModelsLoading && <p className="text-sm text-gray-400">Cargando modelos…</p>}
+              {ollamaModelsError && (
+                <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">{ollamaModelsError}</div>
+              )}
+              {!ollamaModelsLoading && !ollamaModelsError && ollamaModels.length === 0 && (
+                <p className="text-sm text-gray-600">No se encontraron modelos en este endpoint.</p>
+              )}
+              <div className="space-y-2">
+                {ollamaModels.map((m) => (
+                  <div key={m.name} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#111] px-4 py-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-white truncate">{m.name}</p>
+                      <p className="text-[10px] text-gray-600 font-mono">
+                        {m.size != null && Number.isFinite(m.size) ? `${(m.size / 1024 ** 3).toFixed(1)} GB` : '—'}
+                        {m.modified_at ? ` · ${new Date(m.modified_at).toLocaleDateString()}` : ''}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLocalModel(m.name);
+                        setAiMode('local');
+                      }}
+                      className="shrink-0 rounded-lg border border-purple-500/40 bg-purple-600/20 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-purple-200 hover:bg-purple-600/30"
+                    >
+                      Usar modelo
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('settings')}
+                className="text-[11px] font-bold text-red-400 hover:text-red-300 uppercase tracking-wider"
+              >
+                Editar URL y proveedor →
+              </button>
+            </div>
+          </div>
+        ) : activeTab === 'cloudServices' ? (
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-8 relative group min-h-0">
+            <OpenBotWatermark size={176} className="p-6 opacity-[0.06] group-hover:opacity-[0.11]" />
+            <div className="max-w-4xl mx-auto space-y-8 relative z-[1]">
+              <h1 className="text-3xl font-black text-white uppercase tracking-tight">Servicios cloud</h1>
+              <p className="text-sm text-gray-500 font-bold">Qué servicios externos usa OpenBot en modo nube.</p>
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="rounded-2xl border border-cyan-500/25 bg-[#111] p-6">
+                  <Cloud className="text-cyan-400 mb-3" size={28} />
+                  <h3 className="text-lg font-black text-white">Groq</h3>
+                  <p className="text-xs text-gray-500 mt-2 leading-relaxed">
+                    Chat de texto (p. ej. Llama 3.3) vía el backend en <span className="font-mono text-gray-400">/chat</span>. La clave se guarda en Configuración.
+                  </p>
+                  <p className={`mt-4 text-[11px] font-black uppercase tracking-wider ${isCloudConnected ? 'text-green-500' : 'text-red-500'}`}>
+                    {isCloudConnected ? 'Clave API configurada' : 'Falta la clave API'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('settings')}
+                    className="mt-4 w-full rounded-xl bg-cyan-600/90 py-2.5 text-[10px] font-black uppercase tracking-widest text-white hover:bg-cyan-500"
+                  >
+                    Abrir configuración
+                  </button>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-[#111] p-6">
+                  <Network className="text-gray-500 mb-3" size={28} />
+                  <h3 className="text-lg font-black text-white">Pollinations</h3>
+                  <p className="text-xs text-gray-500 mt-2 leading-relaxed">
+                    Imágenes en nube: variable <span className="font-mono text-gray-400">POLLINATIONS_API_KEY</span> en el servidor Python. No es la misma clave que Groq.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'knowledge' ? (
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-8 relative group min-h-0">
+            <OpenBotWatermark size={176} className="p-6 opacity-[0.06] group-hover:opacity-[0.11]" />
+            <div className="max-w-3xl mx-auto space-y-8 relative z-[1]">
+              <div>
+                <h1 className="text-3xl font-black text-white uppercase tracking-tight">Base de conocimiento</h1>
+                <p className="text-sm text-gray-500 mt-2 leading-relaxed">
+                  Fragmentos guardados en este navegador. Si activas la opción, los marcados se añaden al cuerpo del mensaje enviado al chat (el historial visible sigue mostrando solo lo que escribes).
+                </p>
+              </div>
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={kbUseInChat}
+                  onChange={(e) => setKbUseInChat(e.target.checked)}
+                  className="h-4 w-4 rounded border-white/20 bg-black accent-red-600"
+                />
+                <span className="text-sm font-bold text-gray-300">Incluir fragmentos marcados al enviar al chat</span>
+              </label>
+              <div className="rounded-2xl border border-white/10 bg-[#111] p-6 space-y-4">
+                <ConfigInput
+                  label="Título"
+                  icon={<Database size={14} />}
+                  value={kbDraftTitle}
+                  onChange={setKbDraftTitle}
+                  placeholder="Ej: Reglas del proyecto"
+                />
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-gray-500 uppercase tracking-widest px-1">Contenido</label>
+                  <textarea
+                    value={kbDraftBody}
+                    onChange={(e) => setKbDraftBody(e.target.value)}
+                    placeholder="Procedimientos, glosario, contexto de producto…"
+                    className="w-full min-h-[120px] rounded-2xl border border-white/5 bg-black/40 px-4 py-3 text-sm text-white outline-none focus:border-red-500/40 placeholder:text-gray-700"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const t = kbDraftTitle.trim() || 'Sin título';
+                    const b = kbDraftBody.trim();
+                    if (!b) return;
+                    const id =
+                      typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+                    setKbSnippets((prev) => [...prev, { id, title: t, body: b, created: new Date().toISOString() }]);
+                    setKbInjectMap((m) => ({ ...m, [id]: true }));
+                    setKbDraftTitle('');
+                    setKbDraftBody('');
+                  }}
+                  className="w-full rounded-xl bg-red-600 py-3 text-[11px] font-black uppercase tracking-widest text-white hover:bg-red-500"
+                >
+                  Añadir fragmento
+                </button>
+              </div>
+              <div className="space-y-3">
+                {kbSnippets.map((s) => (
+                  <div key={s.id} className="rounded-xl border border-white/10 bg-[#0f0f0f] p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-black text-white">{s.title}</p>
+                        <p className="text-[10px] text-gray-600 mt-1">{new Date(s.created).toLocaleString()}</p>
+                        <p className="text-xs text-gray-500 mt-2 line-clamp-4 whitespace-pre-wrap">{s.body}</p>
+                      </div>
+                      <div className="flex flex-col gap-2 shrink-0">
+                        <label className="flex items-center gap-2 text-[10px] font-bold text-gray-400 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(kbInjectMap[s.id])}
+                            onChange={(e) => setKbInjectMap((m) => ({ ...m, [s.id]: e.target.checked }))}
+                            className="accent-red-600"
+                          />
+                          En chat
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setKbSnippets((p) => p.filter((x) => x.id !== s.id));
+                            setKbInjectMap((m) => {
+                              const n = { ...m };
+                              delete n[s.id];
+                              return n;
+                            });
+                          }}
+                          className="text-left text-[10px] font-black uppercase text-red-500 hover:text-red-400"
+                        >
+                          Eliminar
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {kbSnippets.length === 0 && (
+                  <p className="text-sm text-gray-600 italic">Aún no hay fragmentos.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </main>
     </div>
   );
