@@ -17,6 +17,9 @@ OUTPUT_DIR = r"C:\Users\LEGOLAS\Pictures\OpenBot"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
+# Misma resolución que la nube (Pollinations gen … width=height) para que local y nube se vean igual en el chat.
+IMAGE_GEN_SIZE = 1024
+
 app = FastAPI(title="OpenBot Server")
 
 # Habilitar CORS
@@ -79,8 +82,22 @@ class OpenBotBrain:
     def process_command(self, text, mode="cloud", image_base64=None):
         """
         Procesa comandos de texto y ejecuta acciones en el sistema.
-        Retorna (respuesta, fue_comando)
+        Retorna (respuesta, fue_comando, imagen_data_url_o_None).
+        Si imagen_data_url no es None, el cliente puede mostrar la imagen en el chat.
         """
+        def _file_to_data_url(image_path):
+            import base64 as b64
+            with open(image_path, "rb") as imgf:
+                raw = imgf.read()
+            if raw[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            elif len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                mime = "image/webp"
+            elif raw[:2] == b"\xff\xd8":
+                mime = "image/jpeg"
+            else:
+                mime = "image/jpeg"
+            return f"data:{mime};base64," + b64.standard_b64encode(raw).decode("ascii")
         t = text.lower()
         
         # 1. Info del Sistema
@@ -95,9 +112,9 @@ class OpenBotBrain:
                     ram = f"{round(psutil.virtual_memory().total / (1024**3), 2)} GB"
                 except: pass
                 res = f"🖥️ Sistema: {os_info}\n🧠 CPU: {cpu}\n💾 RAM: {ram}"
-                return res, True
+                return res, True, None
             except:
-                return "Error al leer hardware.", True
+                return "Error al leer hardware.", True, None
 
         # 2. Creación de Documentos (Excel, Word, PDF)
         if "crea un excel" in t or "haz un excel" in t:
@@ -111,9 +128,9 @@ class OpenBotBrain:
                     "Recomendación": ["Mantener", "Comprar", "Observar"]
                 })
                 df.to_excel(path, index=False)
-                return f"✅ Archivo Excel de Inversiones generado y guardado en la carpeta de salidas como 'Reporte_OpenBot.xlsx'.", True
+                return f"✅ Archivo Excel de Inversiones generado y guardado en la carpeta de salidas como 'Reporte_OpenBot.xlsx'.", True, None
             except Exception as e:
-                return f"❌ Error creando Excel: Asegúrate de que no esté abierto el archivo. Detalles: {str(e)}", True
+                return f"❌ Error creando Excel: Asegúrate de que no esté abierto el archivo. Detalles: {str(e)}", True, None
 
         if "crea un word" in t or "haz un word" in t:
             try:
@@ -125,9 +142,9 @@ class OpenBotBrain:
                 doc.add_paragraph('Este documento fue generado automáticamente por el sistema Multi-Agente.')
                 doc.add_paragraph('Aquí se puede incluir todo el análisis detallado de acciones, código o investigación.')
                 doc.save(path)
-                return f"✅ Archivo Word generado y guardado en la carpeta de salidas como 'Documento_OpenBot.docx'.", True
+                return f"✅ Archivo Word generado y guardado en la carpeta de salidas como 'Documento_OpenBot.docx'.", True, None
             except Exception as e:
-                return f"❌ Error creando Word: {str(e)}", True
+                return f"❌ Error creando Word: {str(e)}", True, None
 
         if "crea un pdf" in t or "haz un pdf" in t:
             try:
@@ -141,15 +158,28 @@ class OpenBotBrain:
                 pdf.set_font("Arial", size=12)
                 pdf.cell(200, 10, txt="Generado por el Agente Autónomo Local", ln=1, align='C')
                 pdf.output(path)
-                return f"✅ Archivo PDF generado y guardado en la carpeta de salidas como 'Reporte_OpenBot.pdf'.", True
+                return f"✅ Archivo PDF generado y guardado en la carpeta de salidas como 'Reporte_OpenBot.pdf'.", True, None
             except Exception as e:
-                return f"❌ Error creando PDF: {str(e)}", True
+                return f"❌ Error creando PDF: {str(e)}", True, None
         # 3. Generación de Imágenes (txt2img & img2img)
-        img_keywords = ["dibuja", "genera una imagen", "pinta", "crea una imagen", "edita", "modifica", "transforma", "cambia"]
+        img_keywords = [
+            "dibuja",
+            "genera una imagen",
+            "genera imagen",
+            "pinta",
+            "crea una imagen",
+            "crea una image",
+            "crea imagen",
+            "edita",
+            "modifica",
+            "transforma",
+            "cambia",
+        ]
         if any(keyword in t for keyword in img_keywords):
-            import urllib.request
             import os
             import time
+            import urllib.parse
+            import urllib.request
             import requests
             
             prompt = t
@@ -166,11 +196,119 @@ class OpenBotBrain:
             
             if mode == "cloud" and not is_img2img:
                 try:
-                    url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
-                    urllib.request.urlretrieve(url, path)
-                    return f"✅ Imagen generada en la NUBE y guardada en la carpeta de salidas como '{os.path.basename(path)}'.", True
+                    import base64 as b64_mod
+
+                    p = prompt.strip()
+                    if len(p) > 1500:
+                        p = p[:1500].rsplit(" ", 1)[0]
+                    q = urllib.parse.quote(p, safe="")
+                    ua = (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    )
+                    poll_key = os.environ.get("POLLINATIONS_API_KEY", "").strip()
+                    size_str = f"{IMAGE_GEN_SIZE}x{IMAGE_GEN_SIZE}"
+
+                    if poll_key:
+                        # Documentación Pollinations: generación vía POST + API key (gen.pollinations.ai/v1).
+                        # El GET legacy a veces devuelve 500 si detecta credenciales (.netrc, etc.).
+                        img_session = requests.Session()
+                        img_session.trust_env = False
+                        try:
+                            r = img_session.post(
+                                "https://gen.pollinations.ai/v1/images/generations",
+                                headers={
+                                    "Authorization": f"Bearer {poll_key}",
+                                    "Content-Type": "application/json",
+                                    "User-Agent": ua,
+                                },
+                                json={
+                                    "prompt": p,
+                                    "model": "flux",
+                                    "size": size_str,
+                                    "response_format": "b64_json",
+                                    "n": 1,
+                                    "nologo": True,
+                                },
+                                timeout=180,
+                            )
+                            if r.status_code != 200:
+                                hint = (r.text or "")[:450].replace("\n", " ").strip()
+                                return (
+                                    f"❌ Pollinations (HTTP {r.status_code}): {hint}",
+                                    True,
+                                    None,
+                                )
+                            data = r.json()
+                            if isinstance(data, dict) and data.get("success") is False:
+                                err = data.get("error") or {}
+                                msg = err.get("message") if isinstance(err, dict) else str(data)
+                                return (f"❌ Pollinations: {msg}", True, None)
+                            row = (data.get("data") or [None])[0]
+                            if not row:
+                                return ("❌ Pollinations no devolvió ninguna imagen.", True, None)
+                            if row.get("b64_json"):
+                                raw = b64_mod.standard_b64decode(row["b64_json"])
+                            elif row.get("url"):
+                                r2 = img_session.get(
+                                    row["url"],
+                                    headers={"User-Agent": ua},
+                                    timeout=120,
+                                )
+                                if r2.status_code != 200:
+                                    return (
+                                        f"❌ No se pudo descargar la imagen (HTTP {r2.status_code}).",
+                                        True,
+                                        None,
+                                    )
+                                raw = r2.content
+                            else:
+                                return ("❌ Respuesta Pollinations sin b64_json ni url.", True, None)
+                            if len(raw) < 500:
+                                return ("❌ Imagen recibida demasiado pequeña.", True, None)
+                            with open(path, "wb") as f:
+                                f.write(raw)
+                        finally:
+                            img_session.close()
+                    else:
+                        # Sin API key (solo nube): 1) URL mínima como al inicio del proyecto;
+                        # 2) mismo host con width/height/nologo si la primera no devuelve bytes válidos.
+                        opener = urllib.request.build_opener(
+                            urllib.request.HTTPHandler(),
+                            urllib.request.HTTPSHandler(),
+                            urllib.request.HTTPRedirectHandler(),
+                        )
+                        simple_legacy = f"https://image.pollinations.ai/prompt/{q}"
+                        legacy_sized = (
+                            f"https://image.pollinations.ai/prompt/{q}"
+                            f"?width={IMAGE_GEN_SIZE}&height={IMAGE_GEN_SIZE}&nologo=true"
+                        )
+                        raw = None
+                        for attempt_url in (simple_legacy, legacy_sized):
+                            try:
+                                req = urllib.request.Request(attempt_url, headers={"User-Agent": ua})
+                                with opener.open(req, timeout=120) as resp:
+                                    candidate = resp.read()
+                                if len(candidate) >= 500:
+                                    raw = candidate
+                                    break
+                            except Exception:
+                                continue
+                        if raw is None:
+                            return (
+                                "❌ Imagen en nube sin clave Pollinations: el anónimo no respondió bien. "
+                                "https://enter.pollinations.ai → define POLLINATIONS_API_KEY y reinicia el servidor, "
+                                "o usa modo Local (Forge).",
+                                True,
+                                None,
+                            )
+                        with open(path, "wb") as f:
+                            f.write(raw)
+
+                    return "", True, _file_to_data_url(path)
                 except Exception as e:
-                    return f"❌ Error creando imagen en la nube: {str(e)}", True
+                    return f"❌ Error creando imagen en la nube: {str(e)}", True, None
             else:
                 try:
                     # API Local de Automatic1111 / Forge
@@ -182,8 +320,8 @@ class OpenBotBrain:
                             "prompt": prompt,
                             "negative_prompt": "ugly, deformed, mutated, extra limbs, poorly drawn, bad anatomy",
                             "steps": 25,
-                            "width": 512,
-                            "height": 768,
+                            "width": IMAGE_GEN_SIZE,
+                            "height": IMAGE_GEN_SIZE,
                             "init_images": [base64_data],
                             "denoising_strength": 0.65
                         }
@@ -193,8 +331,8 @@ class OpenBotBrain:
                             "prompt": prompt, 
                             "negative_prompt": "ugly, deformed, mutated, extra limbs, poorly drawn, double body, two heads, bad anatomy", 
                             "steps": 25, 
-                            "width": 512, 
-                            "height": 768
+                            "width": IMAGE_GEN_SIZE,
+                            "height": IMAGE_GEN_SIZE
                         }
                     
                     response = requests.post(url, json=payload, timeout=20)
@@ -204,14 +342,13 @@ class OpenBotBrain:
                         image_data = base64.b64decode(r['images'][0])
                         with open(path, 'wb') as f:
                             f.write(image_data)
-                        action_str = "editada" if is_img2img else "generada"
-                        return f"✅ Imagen {action_str} LOCALMENTE y guardada en la carpeta de salidas como '{os.path.basename(path)}'.", True
+                        return "", True, _file_to_data_url(path)
                     else:
-                        return f"❌ Error: El motor local respondió con código {response.status_code}.", True
+                        return f"❌ Error: El motor local respondió con código {response.status_code}.", True, None
                 except requests.exceptions.ConnectionError:
-                    return "❌ Error: El motor local (Automatic1111/Forge) no está encendido en el puerto 7860. Por favor, inícialo primero.", True
+                    return "❌ Error: El motor local (Automatic1111/Forge) no está encendido en el puerto 7860. Por favor, inícialo primero.", True, None
                 except Exception as e:
-                    return f"❌ Error local desconocido: {str(e)}", True
+                    return f"❌ Error local desconocido: {str(e)}", True, None
 
 
         # 3. Creación de Carpetas
@@ -240,11 +377,11 @@ class OpenBotBrain:
                     with open(os.path.join(full_path, "info.txt"), "w") as f:
                         f.write(f"Reporte generado por OpenBot\nFecha: {time.ctime()}")
                     res += " con el archivo de información."
-                return res, True
+                return res, True, None
             except Exception as e:
-                return f"❌ Error creando carpeta: {str(e)}", True
+                return f"❌ Error creando carpeta: {str(e)}", True, None
 
-        return None, False
+        return None, False, None
 
 brain = OpenBotBrain()
 
@@ -276,7 +413,7 @@ def telegram_worker():
                         brain.add_log(f"Telegram [{chat_id}]: {text}", "user")
                         
                         # 1. Ver si es comando
-                        cmd_res, is_cmd = brain.process_command(text, mode="cloud")
+                        cmd_res, is_cmd, _ = brain.process_command(text, mode="cloud")
                         
                         if is_cmd:
                             final_res = cmd_res
@@ -328,10 +465,13 @@ async def chat(request: dict):
         
     brain.history.append({"role": "user", "content": message})
     
-    cmd_res, is_cmd = brain.process_command(message, mode=mode, image_base64=image_base64)
+    cmd_res, is_cmd, cmd_image = brain.process_command(message, mode=mode, image_base64=image_base64)
     if is_cmd:
         brain.history.append({"role": "assistant", "content": cmd_res})
-        return {"response": cmd_res, "time": time.strftime("%I:%M %p")}
+        out = {"response": cmd_res, "time": time.strftime("%I:%M %p")}
+        if cmd_image:
+            out["image"] = cmd_image
+        return out
     
     if mode == "local":
         try:

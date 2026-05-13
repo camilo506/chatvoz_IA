@@ -23,7 +23,6 @@ import {
   Paperclip,
   Mic,
   MicOff,
-  Image as ImageIcon,
   Volume2,
   VolumeX,
   Brain,
@@ -44,6 +43,74 @@ import {
 
 
 const API_BASE = "http://localhost:8000";
+
+function looksLikeImageRequest(text: string): boolean {
+  const t = text.toLowerCase();
+  const hints = [
+    'dibuja',
+    'genera una imagen',
+    'genera imagen',
+    'pinta',
+    'crea una imagen',
+    'crea una image',
+    'crea imagen',
+    'ilustra',
+    'ilustración',
+    'ilustracion',
+  ];
+  return hints.some((h) => t.includes(h));
+}
+
+/** Frases cortas para la voz al terminar una imagen (una al azar, suena menos robótico). */
+const IMAGE_READY_VOICE_PHRASES = [
+  "Listo, ya tienes la imagen.",
+  "Hecho. Ahí la tienes en pantalla.",
+  "Ya está, échale un vistazo cuando quieras.",
+  "Aquí tienes el resultado.",
+  "Terminé. Mira la imagen arriba.",
+  "Generación lista.",
+  "Va, ya puedes verla.",
+  "Ya está renderizada, fíjate.",
+  "Listo. Espero que te guste el resultado.",
+  "Toma, ya la tienes ahí.",
+  "Ya puedes ver la imagen en el chat.",
+  "Listo el encargo; revisa la imagen.",
+  "Salió bien. Aquí la dejo.",
+  "Ya está. Si quieres, la editas después.",
+  "Listo, versión nueva ahí.",
+  "Así ha quedado el cambio.",
+  "Ya está la imagen, cuéntame qué tal.",
+] as const;
+
+function pickImageReadyVoicePhrase(): string {
+  const list = IMAGE_READY_VOICE_PHRASES;
+  return list[Math.floor(Math.random() * list.length)]!;
+}
+
+/** Cuadro de escritura del chat: el “rectángulo” grande. El borde pasa a rojo al enfocar (`focus-within`).
+ *  Menos rojo: `focus-within:border-red-500/25` · Sin rojo al foco: quita todo `focus-within:border-*` */
+const CHAT_COMPOSER_CLASS =
+  'relative group bg-[#111] border border-white/10 rounded-2xl shadow-2xl overflow-hidden focus-within:border-red-500/40 transition-all p-2';
+
+/** Botón rojo “Enviar” (dentro del cuadro de chat). Tamaño: edita esta cadena.
+ *  Más fino: `pl-3 pr-2.5 py-1 text-[9px] ... gap-1 rounded-md` · Más grande: `pl-6 pr-5 py-2.5 text-xs ... gap-2 rounded-xl` */
+const CHAT_ENVIAR_BUTTON_CLASS =
+  'pl-4 pr-3.5 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-[11px] font-black uppercase tracking-widest text-white shadow-sm shadow-red-900/30 transition-all duration-300 border border-red-500/80 hover:border-white/80 flex items-center gap-2 disabled:opacity-30 disabled:cursor-not-allowed leading-none';
+
+/** Tamaño del icono avión (lucide Send), en px — suele ir un poco menor que el texto */
+const CHAT_ENVIAR_ICON_SIZE = 14;
+
+/** Fila avatar+burbuja cuando hay imagen: misma anchura en nube y local (coincide con Pollinations 1024² en servidor). */
+const CHAT_ASSISTANT_IMAGE_ROW_CLASS =
+  'flex gap-4 min-w-0 w-full max-w-[min(92vw,28rem)]';
+
+/** Marco alrededor de la imagen generada en el chat. */
+const CHAT_ASSISTANT_IMAGE_FRAME_CLASS =
+  'mx-auto w-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-white/10 bg-black/30';
+
+/** <img> generada: alto máx. de visualización (único criterio nube/local). */
+const CHAT_ASSISTANT_IMAGE_IMG_CLASS =
+  'mx-auto block h-auto w-full max-h-[min(48vh,420px)] object-contain sm:max-h-[min(52vh,480px)]';
 
 export default function OpenBotDashboard() {
   const [activeTab, setActiveTab] = useState<'chat' | 'agents' | 'settings'>('chat');
@@ -114,7 +181,7 @@ export default function OpenBotDashboard() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, activeTab]);
+  }, [messages, activeTab, isSending]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -351,13 +418,19 @@ export default function OpenBotDashboard() {
     }, 1200);
   };
 
-  const addMessage = (role: 'user' | 'assistant', content: string) => {
-    const newMessage = { 
-      role, 
-      content, 
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+  const addMessage = (role: 'user' | 'assistant', content: string, opts?: { image?: string }) => {
+    const newMessage: {
+      role: 'user' | 'assistant';
+      content: string;
+      time: string;
+      image?: string;
+    } = {
+      role,
+      content,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
-    setMessages(prev => [...prev, newMessage]);
+    if (opts?.image) newMessage.image = opts.image;
+    setMessages((prev) => [...prev, newMessage]);
   };
 
   const processCommands = (text: string): boolean => {
@@ -504,13 +577,21 @@ export default function OpenBotDashboard() {
         })
       });
       const data = await res.json();
-      if (data.response) {
-        addMessage('assistant', data.response);
-        speak(data.response);
-        setAttachedImage(null); // Limpiar imagen tras enviar con éxito
-      } else if (data.error) {
+      if (data.error) {
         addMessage('assistant', `⚠️ ${data.error}`);
         console.error("Error del servidor:", data.error);
+      } else {
+        const hasImage = Boolean(data.image);
+        const text = typeof data.response === "string" ? data.response : "";
+        if (text || hasImage) {
+          addMessage("assistant", text, hasImage ? { image: data.image } : undefined);
+          if (hasImage) {
+            speak(pickImageReadyVoicePhrase());
+          } else if (text) {
+            speak(text);
+          }
+          setAttachedImage(null);
+        }
       }
     } catch (error) { console.error("Error al enviar mensaje:", error); }
     finally { setIsSending(false); }
@@ -583,10 +664,15 @@ export default function OpenBotDashboard() {
 
         <div className="p-4 border-t border-white/5">
           <div className="bg-[#151515] rounded-xl p-3 flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-red-600 to-orange-500 flex items-center justify-center text-[10px] font-bold">C</div>
+            <div className="relative h-8 w-8 shrink-0 overflow-hidden rounded-full border border-white/10 bg-black">
+              <img
+                src="/recursos/LogoIA.png"
+                alt="Monkey Studio"
+                className="h-full w-full origin-center scale-[1.55] object-contain"
+              />
+            </div>
             <div className="flex flex-col overflow-hidden">
-              <span className="text-xs font-bold text-white truncate">Usuario Admin</span>
-              <span className="text-[10px] text-gray-500 truncate">Pro Plan</span>
+              <span className="text-xs font-bold text-white truncate">Monkey Studio</span>
             </div>
           </div>
         </div>
@@ -606,10 +692,10 @@ export default function OpenBotDashboard() {
               <div className="flex items-center gap-1 bg-black/20 p-1 rounded-full border border-white/5">
                 <button 
                   onClick={() => setAiMode('local')}
-                  className={`p-1.5 rounded-full transition-all duration-300 ${aiMode === 'local' ? 'bg-purple-600 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]' : 'text-gray-600 hover:text-gray-400'}`}
+                  className={`p-1.5 rounded-full transition-all duration-300 ${aiMode === 'local' ? 'bg-cyan-600 text-white shadow-[0_0_15px_rgba(6,182,212,0.4)]' : 'text-gray-600 hover:text-gray-400'}`}
                   title="Modo Local"
                 >
-                  <Brain size={16} />
+                  <Server size={16} />
                 </button>
                 <button 
                   onClick={() => setAiMode('cloud')}
@@ -649,7 +735,10 @@ export default function OpenBotDashboard() {
                 </button>
               )}
               
-              <span className="text-[9px] font-black text-gray-600 uppercase tracking-widest px-2 hidden lg:block">
+              <span
+                className="hidden lg:inline-block w-[5.75rem] shrink-0 truncate text-center text-[9px] font-black uppercase tracking-widest text-gray-600 px-2"
+                title={aiMode === 'local' ? localProvider : cloudProvider}
+              >
                 {aiMode === 'local' ? localProvider : cloudProvider}
               </span>
             </div>
@@ -675,34 +764,92 @@ export default function OpenBotDashboard() {
                   </p>
                 </div>
               )}
-              {messages.map((msg, i) => (
+              {messages.map((msg, i) => {
+                const assistantWithImage = msg.role === 'assistant' && Boolean(msg.image);
+                return (
                 <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} animate-in fade-in slide-in-from-bottom-4 duration-500`}>
-                  <div className={`flex gap-4 max-w-[85%] ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                  <div
+                    className={`${assistantWithImage ? CHAT_ASSISTANT_IMAGE_ROW_CLASS : 'flex gap-4 max-w-[85%]'} ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
+                  >
                     <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 border shadow-lg ${
                       msg.role === 'user' ? 'bg-red-600/20 border-red-500/20 text-red-500' : 'bg-[#1a1a1a] border-white/5 text-gray-500'
                     }`}>
                       {msg.role === 'user' ? 'U' : 'A'}
                     </div>
-                    <div className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                      <div className={`p-5 text-sm leading-relaxed whitespace-pre-wrap shadow-xl ${
+                    <div className={`flex flex-col min-w-0 ${msg.role === 'user' ? 'items-end' : 'items-start'} ${assistantWithImage ? 'w-full' : ''}`}>
+                      <div className={`shadow-xl overflow-hidden ${assistantWithImage ? 'w-full' : ''} ${
                         msg.role === 'user' 
                           ? 'bg-[#1a1111] text-white rounded-2xl rounded-tr-none border border-red-500/10' 
-                          : 'bg-[#151515] text-gray-300 rounded-2xl rounded-tl-none border border-white/5'
+                          : assistantWithImage
+                            ? 'bg-[#151515] text-gray-300 rounded-2xl border border-white/5'
+                            : 'bg-[#151515] text-gray-300 rounded-2xl rounded-tl-none border border-white/5'
                       }`}>
-                        {msg.content}
+                        {msg.content && !msg.image ? (
+                          <div className="p-5 text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</div>
+                        ) : null}
+                        {msg.image ? (
+                          <div className="p-3 w-full min-w-0">
+                            <div className={CHAT_ASSISTANT_IMAGE_FRAME_CLASS}>
+                              <img
+                                src={msg.image}
+                                alt="Imagen generada"
+                                className={CHAT_ASSISTANT_IMAGE_IMG_CLASS}
+                              />
+                            </div>
+                            <div className="flex items-center justify-between mt-3 gap-3">
+                              <button
+                                type="button"
+                                onClick={() => setAttachedImage(msg.image!)}
+                                className="text-[11px] font-black uppercase tracking-widest px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 text-gray-200 transition-colors"
+                              >
+                                Editar
+                              </button>
+                              <a
+                                href={msg.image}
+                                download={`openbot-${msg.time?.replace(/:/g, '-') || 'imagen'}.png`}
+                                className="text-[11px] font-black uppercase tracking-widest px-3 py-2 rounded-xl text-gray-500 hover:text-white border border-transparent hover:border-white/10 transition-colors"
+                              >
+                                Descargar
+                              </a>
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                       <span className="text-[10px] font-bold text-gray-600 mt-2 px-1 uppercase tracking-tighter">{msg.time}</span>
                     </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
+              {isSending &&
+                messages.length > 0 &&
+                messages[messages.length - 1].role === 'user' &&
+                looksLikeImageRequest(messages[messages.length - 1].content) && (
+                  <div className="flex flex-col items-start animate-in fade-in slide-in-from-bottom-4 duration-300">
+                    <div className={CHAT_ASSISTANT_IMAGE_ROW_CLASS}>
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 border shadow-lg bg-[#1a1a1a] border-white/5 text-gray-500">
+                        A
+                      </div>
+                      <div className="flex flex-col items-start min-w-0 w-full">
+                        <div className="rounded-2xl border border-white/5 bg-[#151515] p-6 w-full max-w-[min(92vw,28rem)] min-h-[180px] shadow-xl">
+                          <p className="text-sm font-medium text-white mb-5 tracking-tight">Creando imagen</p>
+                          <div className="grid grid-cols-10 gap-2 opacity-35">
+                            {Array.from({ length: 50 }).map((_, j) => (
+                              <div key={j} className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
             </div>
 
-            <div className="relative group bg-[#111] border border-white/10 rounded-2xl shadow-2xl overflow-hidden focus-within:border-red-500/50 transition-all">
+            <div className={CHAT_COMPOSER_CLASS}>
               {/* Preview de Imagen Adjunta */}
               {attachedImage && (
-                <div className="p-4 flex items-center gap-4 bg-black/40 border-b border-white/5 animate-in slide-in-from-top-2 duration-300">
-                  <div className="relative w-20 h-20 rounded-xl overflow-hidden border border-red-500/30">
+                <div className="mb-2 p-3 flex items-center gap-3 bg-black/40 rounded-xl border border-white/5 animate-in slide-in-from-top-2 duration-300">
+                  <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-red-500/30 shrink-0">
                     <img src={attachedImage} alt="Preview" className="w-full h-full object-cover" />
                     <button 
                       onClick={() => setAttachedImage(null)}
@@ -711,58 +858,75 @@ export default function OpenBotDashboard() {
                       <RotateCcw size={10} className="rotate-45" />
                     </button>
                   </div>
-                  <div className="flex flex-col">
+                  <div className="flex flex-col min-w-0">
                     <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">Imagen Adjunta</span>
                     <span className="text-[9px] text-gray-500 font-bold">Lista para editar o procesar</span>
                   </div>
                 </div>
               )}
 
-              <textarea 
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                placeholder={`Pregunta lo que sea en modo ${aiMode === 'local' ? 'Local' : 'Nube'}...`}
-                className="w-full bg-transparent p-5 pb-16 min-h-[120px] text-sm outline-none transition-all resize-none placeholder:text-gray-600"
-              />
-              
-              <div className="absolute bottom-4 left-5 flex items-center gap-1">
-                <button onClick={() => fileInputRef.current?.click()} className="p-2.5 text-gray-500 hover:text-white hover:bg-black/40 rounded-xl transition-all duration-300 border-2 border-transparent hover:border-white" title="Adjuntar Documento">
-                  <Paperclip size={18} />
-                </button>
-                <button onClick={() => fileInputRef.current?.click()} className="p-2.5 text-gray-500 hover:text-white hover:bg-black/40 rounded-xl transition-all duration-300 border-2 border-transparent hover:border-white" title="Subir Imagen">
-                  <ImageIcon size={18} />
-                </button>
-              </div>
-
-              <div className="absolute bottom-4 right-5 flex items-center gap-4">
-                <div className="relative flex flex-col items-center">
-                  {isRecording && (
-                    <div className="absolute -top-10 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/20 rounded-full animate-in fade-in slide-in-from-bottom-2 duration-300 z-20 whitespace-nowrap">
-                      <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                      <span className="text-[10px] font-black text-red-500 tabular-nums">{formatTime(recordingTime)}</span>
-                    </div>
-                  )}
+              <div className="relative flex min-h-[52px] items-center gap-2 px-2 py-2">
+                <textarea 
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                  placeholder={`Pregunta lo que sea en modo ${aiMode === 'local' ? 'Local' : 'Nube'}...`}
+                  rows={1}
+                  className={`relative z-0 min-h-[44px] max-h-[min(30vh,200px)] min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1 py-2 text-sm leading-normal outline-none transition-all ${
+                    isRecording
+                      ? 'text-gray-200 placeholder:text-gray-600'
+                      : 'text-transparent caret-white placeholder:text-transparent'
+                  }`}
+                />
+                {!isRecording && (
+                  <div className="pointer-events-none absolute inset-y-2 left-2 right-[calc(7.5rem+0.5rem)] flex items-center overflow-hidden text-sm leading-normal text-gray-600">
+                    {inputText.length === 0 ? (
+                      <span className="truncate">{`Pregunta lo que sea en modo ${aiMode === 'local' ? 'Local' : 'Nube'}...`}</span>
+                    ) : (
+                      <span className="whitespace-pre-wrap break-words text-gray-200">{inputText}</span>
+                    )}
+                  </div>
+                )}
+                {isRecording && (
+                  <div
+                    className="pointer-events-none absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+                    aria-live="polite"
+                    aria-label={`Grabando, duración ${formatTime(recordingTime)}`}
+                  >
+                    <span className="text-3xl font-black leading-none tracking-tight text-red-400 tabular-nums drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] sm:text-4xl">
+                      {formatTime(recordingTime)}
+                    </span>
+                  </div>
+                )}
+                <div className="relative z-20 flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-2 text-gray-500 hover:text-white hover:bg-black/40 rounded-lg transition-all duration-300 border-2 border-transparent hover:border-white"
+                    title="Adjuntar imagen"
+                  >
+                    <Paperclip size={17} />
+                  </button>
                   <button 
                     onClick={toggleMic} 
-                    className={`p-2.5 rounded-xl transition-all duration-300 border-2 ${isRecording ? 'text-red-500 bg-red-500/10 border-red-500/50 animate-pulse' : 'text-gray-500 border-transparent hover:text-white hover:bg-black/40 hover:border-white'}`}
+                    className={`p-2 rounded-lg transition-all duration-300 border-2 ${isRecording ? 'text-red-500 bg-red-500/10 border-red-500/50 animate-pulse' : 'text-gray-500 border-transparent hover:text-white hover:bg-black/40 hover:border-white'}`}
                     title={isRecording ? "Detener Grabación" : "Grabar Audio"}
                   >
-                    {isRecording ? <MicOff size={20} /> : <Mic size={20} />}
+                    {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
+                  </button>
+
+                  <button 
+                    onClick={() => handleSend()} 
+                    disabled={isSending || !inputText.trim()} 
+                    className={CHAT_ENVIAR_BUTTON_CLASS}
+                  >
+                    {isSending ? 'Enviando' : 'Enviar'} <Send size={CHAT_ENVIAR_ICON_SIZE} className={isSending ? 'animate-ping' : ''} />
                   </button>
                 </div>
-                
-                <button 
-                  onClick={() => handleSend()} 
-                  disabled={isSending || !inputText.trim()} 
-                  className="pl-6 pr-5 py-2.5 bg-red-600 hover:bg-red-500 rounded-xl text-[11px] font-black uppercase tracking-widest text-white shadow-[0_4px_15px_rgba(220,38,38,0.3)] transition-all duration-300 border-2 border-red-600 hover:border-white flex items-center gap-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                  {isSending ? 'Enviando' : 'Enviar'} <Send size={14} className={isSending ? 'animate-ping' : ''} />
-                </button>
               </div>
             </div>
             
-            <div className="flex justify-center mt-4 gap-6 opacity-30 select-none">
+            <div className="flex justify-center mt-2 gap-6 opacity-30 select-none">
               <span className="text-[10px] font-bold text-gray-500 flex items-center gap-2"><Network size={10} /> Latencia: 42ms</span>
               <span className="text-[10px] font-bold text-gray-500 flex items-center gap-2"><Cpu size={10} /> Load: 12%</span>
             </div>

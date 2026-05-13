@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  /** Oculta la “N” y el menú flotante de herramientas de desarrollo (solo en `next dev`). */
+  devIndicators: false,
 };
 
 export default nextConfig;
