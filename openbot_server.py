@@ -8,10 +8,16 @@ import json
 import time
 import asyncio
 
-# Configuración
-API_KEY = "" # Respaldo
-TELEGRAM_TOKEN = "8689817549:AAH-53j1LwmGEJYoueJ6GfObKeNEJ-BtmSg"
-app = FastAPI()
+# Variables Globales y Configuración
+API_KEY = "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" # Respaldo
+TELEGRAM_TOKEN = "8813314130:AAEu39peX5CMd_dNCaip3ay2x8LfX5hIWZk"
+
+# Directorio donde se guardarán todos los archivos e imágenes generados
+OUTPUT_DIR = r"C:\Users\LEGOLAS\Pictures\OpenBot"
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+
+app = FastAPI(title="OpenBot Server")
 
 # Habilitar CORS
 app.add_middleware(
@@ -64,7 +70,13 @@ class OpenBotBrain:
         print(f"[{type.upper()}] {message}")
         return log_entry
 
-    def process_command(self, text):
+    def get_local_model_for_prompt(self, text, default_model):
+        t = text.lower()
+        if any(keyword in t for keyword in ["codigo", "código", "programa", "script", "python", "javascript", "html", "css", "java", "c++", "funcion", "función"]):
+            return "qwen2.5-coder:7b"
+        return default_model
+
+    def process_command(self, text, mode="cloud", image_base64=None):
         """
         Procesa comandos de texto y ejecuta acciones en el sistema.
         Retorna (respuesta, fue_comando)
@@ -87,12 +99,127 @@ class OpenBotBrain:
             except:
                 return "Error al leer hardware.", True
 
-        # 2. Creación de Carpetas
+        # 2. Creación de Documentos (Excel, Word, PDF)
+        if "crea un excel" in t or "haz un excel" in t:
+            try:
+                import pandas as pd
+                import os
+                path = os.path.join(OUTPUT_DIR, "Reporte_OpenBot.xlsx")
+                df = pd.DataFrame({
+                    "Activo": ["Bitcoin (BTC)", "Ethereum (ETH)", "Solana (SOL)"],
+                    "Precio Estimado": [65000, 3500, 150],
+                    "Recomendación": ["Mantener", "Comprar", "Observar"]
+                })
+                df.to_excel(path, index=False)
+                return f"✅ Archivo Excel de Inversiones generado y guardado en la carpeta de salidas como 'Reporte_OpenBot.xlsx'.", True
+            except Exception as e:
+                return f"❌ Error creando Excel: Asegúrate de que no esté abierto el archivo. Detalles: {str(e)}", True
+
+        if "crea un word" in t or "haz un word" in t:
+            try:
+                from docx import Document
+                import os
+                path = os.path.join(OUTPUT_DIR, "Documento_OpenBot.docx")
+                doc = Document()
+                doc.add_heading('Análisis de OpenBot', 0)
+                doc.add_paragraph('Este documento fue generado automáticamente por el sistema Multi-Agente.')
+                doc.add_paragraph('Aquí se puede incluir todo el análisis detallado de acciones, código o investigación.')
+                doc.save(path)
+                return f"✅ Archivo Word generado y guardado en la carpeta de salidas como 'Documento_OpenBot.docx'.", True
+            except Exception as e:
+                return f"❌ Error creando Word: {str(e)}", True
+
+        if "crea un pdf" in t or "haz un pdf" in t:
+            try:
+                from fpdf import FPDF
+                import os
+                path = os.path.join(OUTPUT_DIR, "Reporte_OpenBot.pdf")
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", size=15)
+                pdf.cell(200, 10, txt="Reporte Confidencial - OpenBot", ln=1, align='C')
+                pdf.set_font("Arial", size=12)
+                pdf.cell(200, 10, txt="Generado por el Agente Autónomo Local", ln=1, align='C')
+                pdf.output(path)
+                return f"✅ Archivo PDF generado y guardado en la carpeta de salidas como 'Reporte_OpenBot.pdf'.", True
+            except Exception as e:
+                return f"❌ Error creando PDF: {str(e)}", True
+        # 3. Generación de Imágenes (txt2img & img2img)
+        img_keywords = ["dibuja", "genera una imagen", "pinta", "crea una imagen", "edita", "modifica", "transforma", "cambia"]
+        if any(keyword in t for keyword in img_keywords):
+            import urllib.request
+            import os
+            import time
+            import requests
+            
+            prompt = t
+            for kw in img_keywords:
+                prompt = prompt.replace(kw, "")
+            prompt = prompt.replace("esta imagen", "").replace("la foto", "").strip()
+            
+            if len(prompt) < 3: prompt = "cyberpunk city landscape"
+            
+            path = os.path.join(OUTPUT_DIR, f"Imagen_OpenBot_{int(time.time())}.jpg")
+            
+            # Si hay una imagen adjunta, forzamos modo local (Img2Img) porque Pollinations no lo soporta de forma simple.
+            is_img2img = image_base64 is not None
+            
+            if mode == "cloud" and not is_img2img:
+                try:
+                    url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}"
+                    urllib.request.urlretrieve(url, path)
+                    return f"✅ Imagen generada en la NUBE y guardada en la carpeta de salidas como '{os.path.basename(path)}'.", True
+                except Exception as e:
+                    return f"❌ Error creando imagen en la nube: {str(e)}", True
+            else:
+                try:
+                    # API Local de Automatic1111 / Forge
+                    if is_img2img:
+                        url = "http://127.0.0.1:7860/sdapi/v1/img2img"
+                        # Limpiar cabecera base64 (ej: "data:image/jpeg;base64,")
+                        base64_data = image_base64.split(",")[1] if "," in image_base64 else image_base64
+                        payload = {
+                            "prompt": prompt,
+                            "negative_prompt": "ugly, deformed, mutated, extra limbs, poorly drawn, bad anatomy",
+                            "steps": 25,
+                            "width": 512,
+                            "height": 768,
+                            "init_images": [base64_data],
+                            "denoising_strength": 0.65
+                        }
+                    else:
+                        url = "http://127.0.0.1:7860/sdapi/v1/txt2img"
+                        payload = {
+                            "prompt": prompt, 
+                            "negative_prompt": "ugly, deformed, mutated, extra limbs, poorly drawn, double body, two heads, bad anatomy", 
+                            "steps": 25, 
+                            "width": 512, 
+                            "height": 768
+                        }
+                    
+                    response = requests.post(url, json=payload, timeout=20)
+                    if response.status_code == 200:
+                        import base64
+                        r = response.json()
+                        image_data = base64.b64decode(r['images'][0])
+                        with open(path, 'wb') as f:
+                            f.write(image_data)
+                        action_str = "editada" if is_img2img else "generada"
+                        return f"✅ Imagen {action_str} LOCALMENTE y guardada en la carpeta de salidas como '{os.path.basename(path)}'.", True
+                    else:
+                        return f"❌ Error: El motor local respondió con código {response.status_code}.", True
+                except requests.exceptions.ConnectionError:
+                    return "❌ Error: El motor local (Automatic1111/Forge) no está encendido en el puerto 7860. Por favor, inícialo primero.", True
+                except Exception as e:
+                    return f"❌ Error local desconocido: {str(e)}", True
+
+
+        # 3. Creación de Carpetas
         if "crea" in t and "carpeta" in t:
             import os
             try:
                 name = "Nueva Carpeta"
-                path = os.path.join(os.path.expanduser("~"), "Desktop")
+                path = OUTPUT_DIR
                 
                 if " en " in t:
                     parts = t.split(" en ")
@@ -136,6 +263,7 @@ def telegram_worker():
             if "result" in response:
                 for update in response["result"]:
                     last_update_id = update["update_id"]
+                    brain.add_log(f"Raw update: {update}", "debug")
                     if "message" in update and "text" in update["message"]:
                         chat_id = update["message"]["chat"]["id"]
                         text = update["message"]["text"]
@@ -148,7 +276,7 @@ def telegram_worker():
                         brain.add_log(f"Telegram [{chat_id}]: {text}", "user")
                         
                         # 1. Ver si es comando
-                        cmd_res, is_cmd = brain.process_command(text)
+                        cmd_res, is_cmd = brain.process_command(text, mode="cloud")
                         
                         if is_cmd:
                             final_res = cmd_res
@@ -174,7 +302,7 @@ def telegram_worker():
                         
             time.sleep(1)
         except Exception as e:
-            print(f"Error en Telegram: {e}")
+            brain.add_log(f"Error en Telegram: {e}", "error")
             time.sleep(5)
 
 # Iniciar hilo de Telegram
@@ -191,6 +319,7 @@ async def chat(request: dict):
     provider = request.get("provider", "Ollama")
     url = request.get("url", "http://localhost:11434")
     model = request.get("model", "llama3.2:latest")
+    image_base64 = request.get("image_base64", None)
     
     brain.add_log(f"Mensaje recibido [{mode.upper()}]: {message}", "user")
     
@@ -199,12 +328,21 @@ async def chat(request: dict):
         
     brain.history.append({"role": "user", "content": message})
     
+    cmd_res, is_cmd = brain.process_command(message, mode=mode, image_base64=image_base64)
+    if is_cmd:
+        brain.history.append({"role": "assistant", "content": cmd_res})
+        return {"response": cmd_res, "time": time.strftime("%I:%M %p")}
+    
     if mode == "local":
         try:
             import requests
+            routed_model = brain.get_local_model_for_prompt(message, model)
+            if routed_model != model:
+                brain.add_log(f"Enrutador AI: Cambiando de {model} a {routed_model} basado en la petición.", "info")
+            
             response = requests.post(
                 f"{url}/api/chat",
-                json={"model": model, "messages": brain.history, "stream": False}
+                json={"model": routed_model, "messages": brain.history, "stream": False}
             )
             response.raise_for_status()
             ai_response = response.json()["message"]["content"]
@@ -214,7 +352,11 @@ async def chat(request: dict):
             return {"error": f"Error Local: {str(e)}"}
     
     try:
-        cloud_key = request.get("cloud_key") or API_KEY
+        cloud_key = request.get("cloud_key", "")
+        if isinstance(cloud_key, str):
+            cloud_key = cloud_key.strip()
+        if not cloud_key:
+            cloud_key = API_KEY
         temp_client = Groq(api_key=cloud_key)
         completion = temp_client.chat.completions.create(
             model="llama-3.3-70b-versatile",

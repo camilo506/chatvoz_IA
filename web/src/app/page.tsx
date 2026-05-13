@@ -52,7 +52,7 @@ export default function OpenBotDashboard() {
   const [isRecording, setIsRecording] = useState(false);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
   const [aiMode, setAiMode] = useState<'local' | 'cloud'>('cloud');
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState<any[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   
   // Configuración Local
@@ -97,6 +97,18 @@ export default function OpenBotDashboard() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachedImage, setAttachedImage] = useState<string | null>(null);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setAttachedImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -302,7 +314,9 @@ export default function OpenBotDashboard() {
       });
       if (res.ok) {
         fetchAgents();
-        handleNewSession();
+        // Clear messages locally when switching agents
+        setMessages([]);
+        fetch(`${API_BASE}/new-session`, { method: 'POST' });
       }
     } catch (err) {
       console.error("Error activando agente:", err);
@@ -485,13 +499,18 @@ export default function OpenBotDashboard() {
           provider: localProviderRef.current,
           url: localUrlRef.current,
           model: localModelRef.current,
-          cloud_key: cloudApiKeyRef.current
+          cloud_key: cloudApiKeyRef.current,
+          image_base64: attachedImage
         })
       });
       const data = await res.json();
       if (data.response) {
         addMessage('assistant', data.response);
         speak(data.response);
+        setAttachedImage(null); // Limpiar imagen tras enviar con éxito
+      } else if (data.error) {
+        addMessage('assistant', `⚠️ ${data.error}`);
+        console.error("Error del servidor:", data.error);
       }
     } catch (error) { console.error("Error al enviar mensaje:", error); }
     finally { setIsSending(false); }
@@ -527,7 +546,7 @@ export default function OpenBotDashboard() {
 
   return (
     <div className="flex h-screen bg-[#0d0d0d] text-[#e0e0e0] font-sans selection:bg-red-500/30">
-      <input type="file" ref={fileInputRef} className="hidden" />
+      <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileChange} accept="image/*" />
       
       {/* Barra Lateral */}
       <aside className="w-64 bg-[#0a0a0a] border-r border-white/5 flex flex-col shrink-0">
@@ -680,6 +699,25 @@ export default function OpenBotDashboard() {
             </div>
 
             <div className="relative group bg-[#111] border border-white/10 rounded-2xl shadow-2xl overflow-hidden focus-within:border-red-500/50 transition-all">
+              {/* Preview de Imagen Adjunta */}
+              {attachedImage && (
+                <div className="p-4 flex items-center gap-4 bg-black/40 border-b border-white/5 animate-in slide-in-from-top-2 duration-300">
+                  <div className="relative w-20 h-20 rounded-xl overflow-hidden border border-red-500/30">
+                    <img src={attachedImage} alt="Preview" className="w-full h-full object-cover" />
+                    <button 
+                      onClick={() => setAttachedImage(null)}
+                      className="absolute top-1 right-1 p-1 bg-red-600 rounded-full text-white hover:bg-red-500 transition-all shadow-lg"
+                    >
+                      <RotateCcw size={10} className="rotate-45" />
+                    </button>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">Imagen Adjunta</span>
+                    <span className="text-[9px] text-gray-500 font-bold">Lista para editar o procesar</span>
+                  </div>
+                </div>
+              )}
+
               <textarea 
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
