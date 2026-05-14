@@ -170,7 +170,7 @@ const CHAT_ENVIAR_ICON_SIZE = 14;
 
 /** Fila avatar+burbuja cuando hay imagen: misma anchura en nube y local (coincide con Pollinations 1024² en servidor). */
 const CHAT_ASSISTANT_IMAGE_ROW_CLASS =
-  'flex gap-4 min-w-0 w-full max-w-[min(92vw,28rem)]';
+  'flex flex-col gap-2 min-w-0 w-full max-w-[min(92vw,28rem)] items-start';
 
 /** Marco alrededor de la imagen generada en el chat. */
 const CHAT_ASSISTANT_IMAGE_FRAME_CLASS =
@@ -610,18 +610,22 @@ export default function OpenBotDashboard() {
     }, 1200);
   };
 
-  const addMessage = (role: 'user' | 'assistant', content: string, opts?: { image?: string }) => {
+  const addMessage = (role: 'user' | 'assistant', content: string, opts?: { image?: string; agentName?: string }) => {
     const newMessage: {
       role: 'user' | 'assistant';
       content: string;
       time: string;
       image?: string;
+      agentName?: string;
     } = {
       role,
       content,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
     if (opts?.image) newMessage.image = opts.image;
+    if (role === 'assistant') {
+      newMessage.agentName = (opts?.agentName ?? activeAgent).trim() || 'Asistente';
+    }
     setMessages((prev) => [...prev, newMessage]);
   };
 
@@ -1139,20 +1143,31 @@ export default function OpenBotDashboard() {
                 return (
                 <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} animate-in fade-in slide-in-from-bottom-4 duration-500`}>
                   <div
-                    className={`${assistantWithImage ? CHAT_ASSISTANT_IMAGE_ROW_CLASS : 'flex gap-4 max-w-[85%]'} ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
+                    className={`${assistantWithImage ? CHAT_ASSISTANT_IMAGE_ROW_CLASS : 'flex flex-col gap-2 max-w-[85%]'} ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
                   >
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 border shadow-lg ${
-                      msg.role === 'user' ? 'bg-red-600/20 border-red-500/20 text-red-500' : 'bg-[#1a1a1a] border-white/5 text-gray-500'
+                    <div className={`rounded-xl flex items-center justify-center shrink-0 border shadow-lg ${
+                      msg.role === 'user'
+                        ? 'w-10 h-10 overflow-hidden px-0.5 bg-red-600/20 border-red-500/20 text-red-500'
+                        : 'min-h-10 w-fit max-w-full px-3 py-1.5 bg-[#1a1a1a] border-white/5 text-gray-400'
                     }`}>
-                      {msg.role === 'user' ? 'U' : 'A'}
+                      {msg.role === 'user' ? (
+                        <span className="text-[11px] font-black leading-none">Tú</span>
+                      ) : (
+                        <span
+                          className="block max-w-[min(92vw,18rem)] truncate text-center text-[10px] font-black leading-tight"
+                          title={msg.agentName || activeAgent}
+                        >
+                          {msg.agentName || activeAgent || 'Asistente'}
+                        </span>
+                      )}
                     </div>
                     <div className={`flex flex-col min-w-0 ${msg.role === 'user' ? 'items-end' : 'items-start'} ${assistantWithImage ? 'w-full' : ''}`}>
                       <div className={`shadow-xl overflow-hidden ${assistantWithImage ? 'w-full' : ''} ${
                         msg.role === 'user' 
-                          ? 'bg-[#1a1111] text-white rounded-2xl rounded-tr-none border border-red-500/10' 
+                          ? 'bg-[#1a1111] text-white rounded-2xl border border-red-500/10' 
                           : assistantWithImage
                             ? 'bg-[#151515] text-gray-300 rounded-2xl border border-white/5'
-                            : 'bg-[#151515] text-gray-300 rounded-2xl rounded-tl-none border border-white/5'
+                            : 'bg-[#151515] text-gray-300 rounded-2xl border border-white/5'
                       }`}>
                         {msg.content && !msg.image ? (
                           <div className="p-5 text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</div>
@@ -1198,8 +1213,13 @@ export default function OpenBotDashboard() {
                 looksLikeImageRequest(messages[messages.length - 1].content) && (
                   <div className="flex flex-col items-start animate-in fade-in slide-in-from-bottom-4 duration-300">
                     <div className={CHAT_ASSISTANT_IMAGE_ROW_CLASS}>
-                      <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 border shadow-lg bg-[#1a1a1a] border-white/5 text-gray-500">
-                        A
+                      <div className="min-h-10 w-fit max-w-full px-3 py-1.5 rounded-xl flex items-center justify-center shrink-0 border shadow-lg bg-[#1a1a1a] border-white/5 text-gray-400">
+                        <span
+                          className="block max-w-[min(92vw,18rem)] truncate text-center text-[10px] font-black leading-tight"
+                          title={activeAgent}
+                        >
+                          {activeAgent || '…'}
+                        </span>
                       </div>
                       <div className="flex flex-col items-start min-w-0 w-full">
                         <div className="rounded-2xl border border-white/5 bg-[#151515] p-6 w-full max-w-[min(92vw,28rem)] min-h-[180px] shadow-xl">
@@ -1399,7 +1419,7 @@ export default function OpenBotDashboard() {
                       >
                         {activeAgent === name ? 'Identidad Cargada' : 'Activar Agente'}
                       </button>
-                      {name !== "OpenBot Original" && (
+                      {name !== "OpenBot" && (
                         <button 
                           onClick={() => handleDeleteAgent(name)}
                           className="p-3.5 bg-white/5 hover:bg-red-600/20 text-gray-700 hover:text-red-500 rounded-xl transition-all border border-white/5 hover:border-red-500/20"

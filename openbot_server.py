@@ -36,7 +36,7 @@ class OpenBotBrain:
         self.logs = []
         self.agents_file = "agents.json"
         self.agents = self.load_agents()
-        self.active_agent_name = "OpenBot Original"
+        self.active_agent_name = "OpenBot"
         self.history = self.get_agent_history(self.active_agent_name)
         self.telegram_chat_id = None # Se guardará al recibir el primer mensaje
 
@@ -44,14 +44,21 @@ class OpenBotBrain:
         if os.path.exists(self.agents_file):
             try:
                 with open(self.agents_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                if "OpenBot Original" in data:
+                    if "OpenBot" not in data:
+                        data["OpenBot"] = data.pop("OpenBot Original")
+                    else:
+                        del data["OpenBot Original"]
+                    self.save_agents_to_file(data)
+                return data
             except:
                 return self.get_default_agents()
         return self.get_default_agents()
 
     def get_default_agents(self):
         default = {
-            "OpenBot Original": {
+            "OpenBot": {
                 "role": "Asistente General",
                 "instructions": "Eres OpenBot, un sistema de agentes autónomos avanzado. Tu objetivo es ayudar al usuario a programar, crear agentes y automatizar tareas. Responde siempre en español de forma profesional y segura. Si el usuario pide dibujar o generar una imagen ilustrada, no sustituyas eso con una descripción larga de la escena: indica en una frase breve que debe usar en el mismo chat frases como «dibuja…» o «crea una imagen de…» para que el sistema genere la imagen en el panel."
             }
@@ -64,7 +71,7 @@ class OpenBotBrain:
             json.dump(agents_dict, f, indent=4, ensure_ascii=False)
 
     def get_agent_history(self, agent_name):
-        agent = self.agents.get(agent_name, self.agents["OpenBot Original"])
+        agent = self.agents.get(agent_name, self.agents["OpenBot"])
         return [{"role": "system", "content": agent["instructions"]}]
 
     def add_log(self, message, type="info"):
@@ -532,6 +539,85 @@ def telegram_send_photo(chat_id, photo_data_url: str, caption=None):
     return True, ""
 
 
+def telegram_download_voice_bytes(file_id: str):
+    """Descarga el archivo de voz de Telegram. Retorna (bytes|None, error, nombre_archivo)."""
+    import os
+    import requests
+
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=60,
+        )
+        j = r.json()
+        if not j.get("ok"):
+            return None, str(j)[:400], "voice.ogg"
+        fp = j.get("result", {}).get("file_path")
+        if not fp:
+            return None, "Sin file_path en getFile", "voice.ogg"
+        fname = os.path.basename(fp) or "voice.ogg"
+        r2 = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{fp}",
+            timeout=120,
+        )
+        if not r2.ok:
+            return None, f"Descarga HTTP {r2.status_code}", fname
+        if not r2.content:
+            return None, "Archivo vacío", fname
+        return r2.content, "", fname
+    except Exception as e:
+        return None, str(e), "voice.ogg"
+
+
+def groq_transcribe_telegram_voice(audio_bytes: bytes, filename="voice.ogg"):
+    """Whisper en Groq (misma API key que el chat). Retorna (texto|None, error).
+
+    Telegram suele usar .oga (Opus en OGG); la API de Groq no admite esa extensión,
+    solo ogg, opus, mp3, etc. — renombramos a .ogg con tipo audio/ogg.
+    """
+    import requests
+
+    try:
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        fn = (filename or "voice.ogg").strip()
+        if "." not in fn:
+            fn = "voice.ogg"
+        low = fn.lower()
+        ext = low.rsplit(".", 1)[-1]
+        allowed = {"flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "opus", "wav", "webm"}
+        if ext not in allowed:
+            fn = "telegram_voice.ogg"
+            mime = "audio/ogg"
+        elif ext in ("ogg",):
+            mime = "audio/ogg"
+        elif ext == "opus":
+            mime = "audio/opus"
+        elif ext == "mp3" or ext == "mpeg" or ext == "mpga":
+            mime = "audio/mpeg"
+        elif ext in ("m4a", "mp4"):
+            mime = "audio/mp4"
+        elif ext == "flac":
+            mime = "audio/flac"
+        elif ext == "wav":
+            mime = "audio/wav"
+        elif ext == "webm":
+            mime = "audio/webm"
+
+        files = {"file": (fn, audio_bytes, mime)}
+        data = {"model": "whisper-large-v3-turbo"}
+        r = requests.post(url, headers=headers, files=files, data=data, timeout=120)
+        if not r.ok:
+            return None, (r.text or "")[:500]
+        t = (r.json().get("text") or "").strip()
+        if not t:
+            return None, "Transcripción vacía"
+        return t, ""
+    except Exception as e:
+        return None, str(e)
+
+
 # --- LÓGICA DE TELEGRAM ---
 def telegram_worker():
     import requests
@@ -548,58 +634,96 @@ def telegram_worker():
                 for update in response["result"]:
                     last_update_id = update["update_id"]
                     brain.add_log(f"Raw update: {update}", "debug")
-                    if "message" in update and "text" in update["message"]:
-                        chat_id = update["message"]["chat"]["id"]
-                        text = update["message"]["text"]
-                        
-                        # Guardar el chat_id del primer mensaje (dueño)
-                        if not brain.telegram_chat_id:
-                            brain.telegram_chat_id = chat_id
-                            brain.add_log(f"Telegram enlazado con Chat ID: {chat_id}", "success")
+                    if "message" not in update:
+                        continue
+                    msg = update["message"]
+                    chat_id = msg["chat"]["id"]
 
-                        brain.add_log(f"Telegram [{chat_id}]: {text}", "user")
-                        
-                        cmd_res, is_cmd, cmd_image = brain.process_command(text, mode="cloud")
-                        
-                        if is_cmd:
-                            final_res = cmd_res
-                            if cmd_image:
-                                ok, err = telegram_send_photo(chat_id, cmd_image, final_res)
-                                if not ok:
-                                    brain.add_log(f"Telegram sendPhoto falló: {err}", "error")
-                                    fallback = (final_res or "Imagen generada.") + f"\n\n❌ No se pudo enviar la foto por Telegram: {err}"
-                                    requests.post(
-                                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                        json={"chat_id": chat_id, "text": fallback[:4090]},
-                                        timeout=60,
-                                    )
-                            else:
+                    text = None
+                    if "text" in msg:
+                        text = (msg.get("text") or "").strip()
+                    elif "voice" in msg:
+                        file_id = msg["voice"].get("file_id")
+                        if not file_id:
+                            continue
+                        raw, derr, vname = telegram_download_voice_bytes(file_id)
+                        if derr or not raw:
+                            brain.add_log(f"Telegram voz (descarga): {derr}", "error")
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": f"❌ No pude obtener el audio de voz: {derr or 'error'}",
+                                },
+                                timeout=60,
+                            )
+                            continue
+                        text, terr = groq_transcribe_telegram_voice(raw, vname)
+                        if terr or not text:
+                            brain.add_log(f"Telegram voz (transcripción): {terr}", "error")
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": f"❌ No pude transcribir el audio: {terr or 'error'}",
+                                },
+                                timeout=60,
+                            )
+                            continue
+                    else:
+                        continue
+
+                    if not text:
+                        continue
+
+                    # Guardar el chat_id del primer mensaje (dueño)
+                    if not brain.telegram_chat_id:
+                        brain.telegram_chat_id = chat_id
+                        brain.add_log(f"Telegram enlazado con Chat ID: {chat_id}", "success")
+
+                    brain.add_log(f"Telegram [{chat_id}]: {text}", "user")
+
+                    cmd_res, is_cmd, cmd_image = brain.process_command(text, mode="cloud")
+
+                    if is_cmd:
+                        final_res = cmd_res
+                        if cmd_image:
+                            ok, err = telegram_send_photo(chat_id, cmd_image, final_res)
+                            if not ok:
+                                brain.add_log(f"Telegram sendPhoto falló: {err}", "error")
+                                fallback = (final_res or "Imagen generada.") + f"\n\n❌ No se pudo enviar la foto por Telegram: {err}"
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                    json={"chat_id": chat_id, "text": final_res or "Listo."},
+                                    json={"chat_id": chat_id, "text": fallback[:4090]},
                                     timeout=60,
                                 )
                         else:
-                            # 2. Si no es comando, usar IA (Nube por defecto para Telegram)
-                            try:
-                                # Aquí podríamos reusar la lógica de chat de la nube
-                                from groq import Groq
-                                temp_client = Groq(api_key=API_KEY)
-                                history = brain.get_agent_history(brain.active_agent_name)
-                                history.append({"role": "user", "content": text})
-                                completion = temp_client.chat.completions.create(
-                                    model="llama-3.3-70b-versatile",
-                                    messages=history
-                                )
-                                final_res = completion.choices[0].message.content
-                            except Exception as e:
-                                final_res = f"Error IA: {str(e)}"
-                            
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": final_res},
+                                json={"chat_id": chat_id, "text": final_res or "Listo."},
                                 timeout=60,
                             )
+                    else:
+                        # Si no es comando, usar IA (Nube por defecto para Telegram)
+                        try:
+                            from groq import Groq
+
+                            temp_client = Groq(api_key=API_KEY)
+                            history = brain.get_agent_history(brain.active_agent_name)
+                            history.append({"role": "user", "content": text})
+                            completion = temp_client.chat.completions.create(
+                                model="llama-3.3-70b-versatile",
+                                messages=history,
+                            )
+                            final_res = completion.choices[0].message.content
+                        except Exception as e:
+                            final_res = f"Error IA: {str(e)}"
+
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": final_res},
+                            timeout=60,
+                        )
                         
             time.sleep(1)
         except Exception as e:
@@ -701,7 +825,7 @@ async def activate_agent(data: dict):
 
 @app.delete("/agents/{name}")
 async def delete_agent(name: str):
-    if name != "OpenBot Original" and name in brain.agents:
+    if name != "OpenBot" and name in brain.agents:
         del brain.agents[name]
         brain.save_agents_to_file(brain.agents)
         return {"status": "deleted"}
