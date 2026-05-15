@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   MessageSquare, 
   LayoutDashboard, 
@@ -20,7 +20,7 @@ import {
   RotateCcw,
   Maximize2,
   Send,
-  Paperclip,
+  Plus,
   Mic,
   MicOff,
   Volume2,
@@ -38,11 +38,16 @@ import {
   Eye,
   EyeOff,
   AlertCircle,
-  Square
+  Square,
+  X,
+  FileText,
 } from 'lucide-react';
 
 
 const API_BASE = "http://localhost:8000";
+
+/** Id estable para `<label htmlFor>` — evita fallos con `input{display:none}` en algunos navegadores. */
+const OPENBOT_CHAT_FILE_INPUT_ID = "openbot-chat-file-input";
 
 const LS_KB_SNIPPETS = "openbot_knowledge_snippets";
 const LS_KB_USE = "openbot_knowledge_use_in_chat";
@@ -58,6 +63,59 @@ type MainTab =
   | "knowledge";
 
 type KbSnippet = { id: string; title: string; body: string; created: string };
+
+type ChatBubbleAttachment = { dataUrl: string; name: string; isImage: boolean };
+type ChatComposerAttachment = ChatBubbleAttachment & { id: string };
+
+const ATTACH_MAX_FILES = 12;
+const ATTACH_MAX_BYTES_PER_FILE = 8 * 1024 * 1024;
+
+function newAttachmentId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `att-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function fileExtensionBadge(filename: string): string {
+  const m = /\.([^.]+)$/i.exec(filename);
+  const raw = (m?.[1] ?? "").toUpperCase();
+  return raw.slice(0, 14) || "ARCHIVO";
+}
+
+/** MIME vacío es habitual en algunos SO/navegadores; HEIC/HEIF suele no pintarse en Chrome. */
+function guessIsImageFile(file: File): boolean {
+  const t = (file.type ?? "").toLowerCase();
+  if (t.startsWith("image/")) return true;
+  const ext = (file.name.split(".").pop() ?? "").toLowerCase();
+  return ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "ico", "avif", "heic", "heif", "tif", "tiff"].includes(ext);
+}
+
+function DataUrlImagePreview({
+  src,
+  className,
+  fallbackClassName,
+  label,
+}: {
+  src: string;
+  className?: string;
+  fallbackClassName?: string;
+  label: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <div
+        className={`flex items-center justify-center bg-black/60 px-1 text-center text-[9px] font-semibold leading-tight text-gray-400 ${fallbackClassName ?? ""}`}
+      >
+        Vista previa no disponible ({label})
+      </div>
+    );
+  }
+  return (
+    <img src={src} alt="" className={className} onError={() => setFailed(true)} decoding="async" />
+  );
+}
 
 function looksLikeImageRequest(text: string): boolean {
   const t = text.toLowerCase().trim();
@@ -129,6 +187,88 @@ function looksLikeImageRequest(text: string): boolean {
   return markers.some((m) => pad.includes(m));
 }
 
+/** Pedidos de edición típicos cuando hay foto adjunta (alinea con el servidor img2img). */
+function looksLikeAttachedImageEdit(text: string): boolean {
+  const t = text.toLowerCase().trim();
+  const markers = [
+    "cambia",
+    "cambiar",
+    "cambiale",
+    "modifica",
+    "modificá",
+    "editar",
+    "edita",
+    "ajusta",
+    "reemplaza",
+    "transforma",
+    "convierte",
+    "pon la",
+    "pon el",
+    "ponle",
+    "color ",
+    "camisa",
+    "camiseta",
+    "pantal",
+    "pelo",
+    "ojos",
+    "fondo",
+    " a azul",
+    " a rojo",
+    " a verde",
+    "de azul",
+    "de rojo",
+    "igual pero",
+    "esta imagen",
+    "esta foto",
+    "haz que",
+    "que sea",
+    "teñ",
+    "tiñ",
+    "pinte",
+  ];
+  return markers.some((m) => t.includes(m));
+}
+
+function showsPendingImageJob(content: string, hasImageAttachment: boolean): boolean {
+  return looksLikeImageRequest(content) || (hasImageAttachment && looksLikeAttachedImageEdit(content));
+}
+
+/** Coincide el texto reconocido por voz con una clave de agente en `agents.json`. */
+function resolveAgentNameFromVoiceFragment(fragment: string, agentKeys: string[]): string | null {
+  let f = fragment
+    .toLowerCase()
+    .trim()
+    .replace(/^[¿¡]+/, '')
+    .replace(/[.!?¿¡,;:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*(por favor|ahora|gracias|vale|venga)\s*$/i, '')
+    .trim();
+  if (!f) return null;
+  const nospace = f.replace(/\s+/g, '');
+  for (const orig of agentKeys) {
+    const low = orig.toLowerCase();
+    if (low === f) return orig;
+    if (low.replace(/\s+/g, '') === nospace) return orig;
+  }
+  const token0 = f.split(/\s+/)[0]?.replace(/[.!?]+$/g, '') ?? '';
+  if (token0) {
+    for (const orig of agentKeys) {
+      if (orig.toLowerCase() === token0) return orig;
+    }
+  }
+  for (const orig of agentKeys) {
+    const low = orig.toLowerCase();
+    if (f.includes(low)) return orig;
+  }
+  if (f.length >= 3) {
+    for (const orig of agentKeys) {
+      const low = orig.toLowerCase();
+      if (low.includes(f)) return orig;
+    }
+  }
+  return null;
+}
+
 /** Frases cortas para la voz al terminar una imagen (una al azar, suena menos robótico). */
 const IMAGE_READY_VOICE_PHRASES = [
   "Listo, ya tienes la imagen.",
@@ -156,9 +296,10 @@ function pickImageReadyVoicePhrase(): string {
 }
 
 /** Cuadro de escritura del chat: el “rectángulo” grande. El borde pasa a rojo al enfocar (`focus-within`).
- *  Menos rojo: `focus-within:border-red-500/25` · Sin rojo al foco: quita todo `focus-within:border-*` */
+ *  Menos rojo: `focus-within:border-red-500/25` · Sin rojo al foco: quita todo `focus-within:border-*`
+ *  Sin `overflow-hidden` vertical para no recortar miniaturas cuando el flex comprime el panel. */
 const CHAT_COMPOSER_CLASS =
-  'relative group bg-[#111] border border-white/10 rounded-2xl shadow-2xl overflow-hidden focus-within:border-red-500/40 transition-all p-2';
+  'relative group bg-[#111] border border-white/10 rounded-2xl shadow-2xl overflow-x-auto overflow-y-visible focus-within:border-red-500/40 transition-all p-2';
 
 /** Botón rojo “Enviar” (dentro del cuadro de chat). Tamaño: edita esta cadena.
  *  Más fino: `pl-3 pr-2.5 py-1 text-[9px] ... gap-1 rounded-md` · Más grande: `pl-6 pr-5 py-2.5 text-xs ... gap-2 rounded-xl` */
@@ -251,7 +392,25 @@ export default function OpenBotDashboard() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [attachedImage, setAttachedImage] = useState<string | null>(null);
+  const [composerAttachments, setComposerAttachments] = useState<ChatComposerAttachment[]>([]);
+  const composerAttachmentsRef = useRef<ChatComposerAttachment[]>([]);
+  /** Encadena lecturas para que varias selecciones seguidas no pisen el estado (React tras await). */
+  const ingestChainRef = useRef(Promise.resolve());
+
+  useEffect(() => {
+    composerAttachmentsRef.current = composerAttachments;
+  }, [composerAttachments]);
+
+  const patchComposerAttachments = useCallback(
+    (updater: (prev: ChatComposerAttachment[]) => ChatComposerAttachment[]) => {
+      setComposerAttachments((prev) => {
+        const next = updater(prev);
+        composerAttachmentsRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
 
   const [dashboardApi, setDashboardApi] = useState<{ ok: boolean; name: string } | null>(null);
   const [dashboardApiAt, setDashboardApiAt] = useState('');
@@ -357,22 +516,107 @@ export default function OpenBotDashboard() {
     fetchOllamaModels();
   }, [activeTab, localUrl]);
 
+  const appendComposerFiles = useCallback((picked: File[]) => {
+    if (!picked.length) return ingestChainRef.current;
+
+    const run = async () => {
+      const room = ATTACH_MAX_FILES - composerAttachmentsRef.current.length;
+      if (room <= 0) {
+        window.alert(`Máximo ${ATTACH_MAX_FILES} archivos en borrador.`);
+        return;
+      }
+
+      let files = picked.slice(0, room);
+      const tooBig = files.filter((f) => f.size > ATTACH_MAX_BYTES_PER_FILE);
+      files = files.filter((f) => f.size <= ATTACH_MAX_BYTES_PER_FILE);
+      if (tooBig.length) {
+        window.alert(
+          `Se omitieron ${tooBig.length} archivo(s) mayores de ${ATTACH_MAX_BYTES_PER_FILE / (1024 * 1024)} MB.`,
+        );
+      }
+      if (!files.length) return;
+
+      const readOne = (file: File) =>
+        new Promise<ChatComposerAttachment>((resolve, reject) => {
+          const r = new FileReader();
+          r.onloadend = () => {
+            if (r.error) {
+              reject(r.error);
+              return;
+            }
+            const dataUrl = r.result as string | null;
+            if (!dataUrl || !dataUrl.startsWith("data:")) {
+              reject(new Error("lectura vacía o incompleta"));
+              return;
+            }
+            resolve({
+              id: newAttachmentId(),
+              dataUrl,
+              name: file.name || "archivo",
+              isImage: guessIsImageFile(file),
+            });
+          };
+          r.onerror = () => reject(r.error ?? new Error("FileReader"));
+          try {
+            r.readAsDataURL(file);
+          } catch (err) {
+            reject(err);
+          }
+        });
+
+      const settled = await Promise.allSettled(files.map(readOne));
+      const newOnes = settled
+        .filter((s): s is PromiseFulfilledResult<ChatComposerAttachment> => s.status === "fulfilled")
+        .map((s) => s.value);
+
+      const failed = settled.length - newOnes.length;
+      if (failed > 0) {
+        console.warn("[adjuntos] Archivos omitidos por error de lectura:", failed);
+      }
+      if (!newOnes.length) {
+        window.alert(
+          "No se pudieron leer los archivos (permiso denegado o formato no soportado). Prueba otras imágenes o otra carpeta.",
+        );
+        return;
+      }
+
+      patchComposerAttachments((prev) =>
+        [...prev, ...newOnes].slice(0, ATTACH_MAX_FILES),
+      );
+    };
+
+    ingestChainRef.current = ingestChainRef.current.then(run).catch((err) => {
+      console.error("[adjuntos] Error en cola de archivos:", err);
+    });
+    return ingestChainRef.current;
+  }, [patchComposerAttachments]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setAttachedImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
-    }
+    const list = e.target.files;
+    const batch = list?.length ? Array.from(list) : [];
+    e.target.value = "";
+    if (!batch.length) return;
+    void appendComposerFiles(batch);
+  };
+
+  const handleComposerDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleComposerDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const dt = e.dataTransfer.files;
+    if (!dt?.length) return;
+    void appendComposerFiles(Array.from(dt));
   };
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, activeTab, isSending]);
+  }, [messages, activeTab, isSending, composerAttachments]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -610,18 +854,24 @@ export default function OpenBotDashboard() {
     }, 1200);
   };
 
-  const addMessage = (role: 'user' | 'assistant', content: string, opts?: { image?: string; agentName?: string }) => {
+  const addMessage = (
+    role: 'user' | 'assistant',
+    content: string,
+    opts?: { image?: string; agentName?: string; attachments?: ChatBubbleAttachment[] },
+  ) => {
     const newMessage: {
       role: 'user' | 'assistant';
       content: string;
       time: string;
       image?: string;
       agentName?: string;
+      attachments?: ChatBubbleAttachment[];
     } = {
       role,
       content,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
+    if (opts?.attachments?.length) newMessage.attachments = opts.attachments;
     if (opts?.image) newMessage.image = opts.image;
     if (role === 'assistant') {
       newMessage.agentName = (opts?.agentName ?? activeAgent).trim() || 'Asistente';
@@ -660,20 +910,65 @@ export default function OpenBotDashboard() {
       return true;
     }
 
-    // Comandos de Agentes
-    if (lowerText.includes("cambia al agente") || lowerText.includes("usa el agente") || lowerText.includes("activa al agente")) {
-      // Intentar extraer el nombre del agente
-      const parts = lowerText.split("agente");
+    // Comandos de Agentes (voz y texto): cambiar de agente por frase natural
+    const agentKeys = Object.keys(agents);
+    const trySwitchAgent = (fragment: string, notFoundMessage: boolean): boolean => {
+      const foundName = resolveAgentNameFromVoiceFragment(fragment, agentKeys);
+      if (foundName) {
+        void handleActivateAgent(foundName);
+        addMessage('assistant', `Cambiando identidad al agente: ${foundName}`);
+        speak(`Cambiando identidad al agente ${foundName}`);
+        return true;
+      }
+      if (notFoundMessage) {
+        addMessage(
+          'assistant',
+          `No encontré un agente con ese nombre. Disponibles: ${agentKeys.length ? agentKeys.join(', ') : '(ninguno)'}.`
+        );
+        speak('No encontré ese agente en la lista.');
+        return true;
+      }
+      return false;
+    };
+
+    const highConfidenceAgentPatterns: RegExp[] = [
+      /(?:cambia|usa|activa|activar|cambiar|pasar)\s+al\s+agente\s+(.+)$/i,
+      /(?:cambia|usa|activa|activar)\s+(?:a|el)\s+agente\s+(.+)$/i,
+      /hablar\s+con\s+el\s+agente\s+(.+)$/i,
+      /hablar\s+con\s+agente\s+(.+)$/i,
+      /quiero\s+hablar\s+con\s+el\s+agente\s+(.+)$/i,
+      /quiero\s+hablar\s+con\s+agente\s+(.+)$/i,
+      /(?:pon|ponme|dame)\s+(?:el\s+)?agente\s+(.+)$/i,
+    ];
+    for (const re of highConfidenceAgentPatterns) {
+      const m = lowerText.match(re);
+      if (m?.[1]?.trim()) {
+        return trySwitchAgent(m[1].trim(), true);
+      }
+    }
+
+    // Sin la palabra "agente": solo cambia si el nombre coincide con un agente real (evita falsos positivos)
+    const looseAgentPatterns: RegExp[] = [
+      /quiero\s+hablar\s+con\s+(.+)$/i,
+      /(?:me\s+gustaría|me\s+gustaria)\s+hablar\s+con\s+(.+)$/i,
+    ];
+    for (const re of looseAgentPatterns) {
+      const m = lowerText.match(re);
+      if (m?.[1]?.trim()) {
+        if (trySwitchAgent(m[1].trim(), false)) return true;
+        break;
+      }
+    }
+
+    if (
+      lowerText.includes('cambia al agente') ||
+      lowerText.includes('usa el agente') ||
+      lowerText.includes('activa al agente')
+    ) {
+      const parts = lowerText.split('agente');
       if (parts.length > 1) {
-        const targetName = parts[1].trim();
-        // Buscar coincidencia en la lista de agentes (ignorando mayúsculas/minúsculas)
-        const foundName = Object.keys(agents).find(name => name.toLowerCase() === targetName);
-        if (foundName) {
-          handleActivateAgent(foundName);
-          addMessage('assistant', `Cambiando identidad al agente: ${foundName}`);
-          speak(`Cambiando identidad al agente ${foundName}`);
-          return true;
-        }
+        const tail = parts[parts.length - 1].trim();
+        if (tail) return trySwitchAgent(tail, true);
       }
     }
 
@@ -759,30 +1054,62 @@ export default function OpenBotDashboard() {
 
   const handleSend = async (textOverride?: string) => {
     const message = textOverride || inputText;
-    if (!message.trim() || isSending) return;
+    const trimmed = message.trim();
+    const attachSnap = [...composerAttachments];
+    if ((!trimmed && attachSnap.length === 0) || isSending) return;
+
+    const bubbleParts: ChatBubbleAttachment[] = attachSnap.map(({ dataUrl, name, isImage }) => ({
+      dataUrl,
+      name,
+      isImage,
+    }));
 
     setInputText("");
-    addMessage('user', message);
+    patchComposerAttachments(() => []);
+    addMessage(
+      "user",
+      trimmed,
+      bubbleParts.length ? { attachments: bubbleParts } : undefined,
+    );
 
     // Revisar si es un comando antes de enviar a la IA
-    if (processCommands(message)) return;
+    if (processCommands(trimmed)) return;
 
     setIsSending(true);
     try {
-      const outboundMessage = buildKnowledgeAugmentedMessage(message);
+      const imageDataUrls = attachSnap.filter((a) => a.isImage).map((a) => a.dataUrl);
+      const docNames = attachSnap.filter((a) => !a.isImage).map((a) => a.name);
+
+      let textForApi =
+        trimmed ||
+        (imageDataUrls.length
+          ? "El usuario ha adjuntado una o más imágenes; responde según el contexto del agente si aplica."
+          : "El usuario ha adjuntado archivo(s); responde según el contexto del agente si aplica.");
+
+      if (docNames.length) {
+        textForApi += `\n\n[Adjuntos (${docNames.length} archivo(s); el servidor solo recibe nombre y tamaño desde el navegador, no el contenido): ${docNames.join(", ")}]`;
+      }
+
+      const outboundMessage = buildKnowledgeAugmentedMessage(textForApi);
+
+      const body: Record<string, unknown> = {
+        message: outboundMessage,
+        mode: aiModeRef.current,
+        provider: localProviderRef.current,
+        url: localUrlRef.current,
+        model: localModelRef.current,
+        cloud_key: cloudApiKeyRef.current,
+        image_base64: imageDataUrls[0] ?? null,
+      };
+      if (imageDataUrls.length > 1) {
+        body.image_base64_list = imageDataUrls;
+      }
+
       const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(240_000),
-        body: JSON.stringify({ 
-          message: outboundMessage,
-          mode: aiModeRef.current,
-          provider: localProviderRef.current,
-          url: localUrlRef.current,
-          model: localModelRef.current,
-          cloud_key: cloudApiKeyRef.current,
-          image_base64: attachedImage
-        })
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (data.error) {
@@ -798,7 +1125,6 @@ export default function OpenBotDashboard() {
           } else if (text) {
             speak(text);
           }
-          setAttachedImage(null);
         }
       }
     } catch (error) {
@@ -846,7 +1172,6 @@ export default function OpenBotDashboard() {
 
   return (
     <div className="flex h-screen bg-[#0d0d0d] text-[#e0e0e0] font-sans selection:bg-red-500/30">
-      <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileChange} accept="image/*" />
       
       {/* Barra Lateral */}
       <aside className="w-64 bg-[#0a0a0a] border-r border-white/5 flex flex-col shrink-0">
@@ -1169,10 +1494,79 @@ export default function OpenBotDashboard() {
                             ? 'bg-[#151515] text-gray-300 rounded-2xl border border-white/5'
                             : 'bg-[#151515] text-gray-300 rounded-2xl border border-white/5'
                       }`}>
-                        {msg.content && !msg.image ? (
-                          <div className="p-5 text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</div>
-                        ) : null}
-                        {msg.image ? (
+                        {msg.role === 'user' ? (
+                          <>
+                            {msg.attachments && msg.attachments.length > 0 ? (
+                              <div
+                                className={`max-w-full overflow-x-auto px-3 pt-3 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/15 ${
+                                  msg.content?.trim() ? "pb-2" : "pb-3"
+                                }`}
+                              >
+                                <div className="ml-auto flex w-max max-w-none flex-nowrap justify-end gap-2.5">
+                                  {msg.attachments.map((a: ChatBubbleAttachment, ix: number) =>
+                                    a.isImage ? (
+                                      <div
+                                        key={`${a.name}-${ix}`}
+                                        className="relative h-[72px] w-[72px] shrink-0 overflow-hidden rounded-xl border border-white/15 bg-black/50 shadow-md ring-1 ring-black/30"
+                                      >
+                                        <DataUrlImagePreview
+                                          src={a.dataUrl}
+                                          label={a.name}
+                                          className="block h-full w-full object-cover"
+                                          fallbackClassName="flex min-h-[4.5rem] w-full items-center justify-center px-1 py-2 text-[9px] leading-tight"
+                                        />
+                                      </div>
+                                    ) : (
+                                    <a
+                                      key={`${a.name}-${ix}`}
+                                      href={a.dataUrl}
+                                      download={a.name}
+                                      className="relative flex h-[72px] min-w-[180px] max-w-[260px] shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-gradient-to-br from-red-950/40 to-black/60 px-3 py-2 shadow-md ring-1 ring-black/25 transition hover:border-white/25"
+                                    >
+                                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-600 text-white shadow-inner">
+                                        <FileText size={18} strokeWidth={2} />
+                                      </span>
+                                      <span className="min-w-0 flex-1 text-left">
+                                        <span className="block truncate text-[11px] font-bold leading-tight text-white">
+                                          {a.name}
+                                        </span>
+                                        <span className="text-[9px] font-black uppercase tracking-wider text-gray-500">
+                                          {fileExtensionBadge(a.name)}
+                                        </span>
+                                      </span>
+                                    </a>
+                                  ),
+                                )}
+                                </div>
+                              </div>
+                            ) : msg.image ? (
+                              <div className={`p-3 ${msg.content?.trim() ? 'pb-0' : ''}`}>
+                                <div className="ml-auto max-w-[min(280px,82vw)] overflow-hidden rounded-xl border border-white/10 bg-black/40">
+                                  <DataUrlImagePreview
+                                    src={msg.image}
+                                    label="imagen"
+                                    className="block max-h-[min(40vh,360px)] w-full object-contain"
+                                    fallbackClassName="min-h-[100px] w-full py-8"
+                                  />
+                                </div>
+                              </div>
+                            ) : null}
+                            {msg.content?.trim() ? (
+                              <div
+                                className={`p-5 text-sm leading-relaxed whitespace-pre-wrap break-words ${
+                                  msg.attachments?.length || msg.image ? 'pt-3' : ''
+                                }`}
+                              >
+                                {msg.content}
+                              </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            {msg.content && !msg.image ? (
+                              <div className="p-5 text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</div>
+                            ) : null}
+                            {msg.image ? (
                           <div className="p-3 w-full min-w-0">
                             <div className={CHAT_ASSISTANT_IMAGE_FRAME_CLASS}>
                               <img
@@ -1184,7 +1578,17 @@ export default function OpenBotDashboard() {
                             <div className="flex items-center justify-between mt-3 gap-3">
                               <button
                                 type="button"
-                                onClick={() => setAttachedImage(msg.image!)}
+                                onClick={() =>
+                                  msg.image &&
+                                  patchComposerAttachments(() => [
+                                    {
+                                      id: newAttachmentId(),
+                                      dataUrl: msg.image,
+                                      name: "imagen-openbot.png",
+                                      isImage: true,
+                                    },
+                                  ])
+                                }
                                 className="text-[11px] font-black uppercase tracking-widest px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 text-gray-200 transition-colors"
                               >
                                 Editar
@@ -1199,7 +1603,9 @@ export default function OpenBotDashboard() {
                               </a>
                             </div>
                           </div>
-                        ) : null}
+                            ) : null}
+                          </>
+                        )}
                       </div>
                       <span className="text-[10px] font-bold text-gray-600 mt-2 px-1 uppercase tracking-tighter">{msg.time}</span>
                     </div>
@@ -1209,8 +1615,11 @@ export default function OpenBotDashboard() {
               })}
               {isSending &&
                 messages.length > 0 &&
-                messages[messages.length - 1].role === 'user' &&
-                looksLikeImageRequest(messages[messages.length - 1].content) && (
+                messages[messages.length - 1].role === "user" &&
+                showsPendingImageJob(
+                  messages[messages.length - 1].content,
+                  Boolean(messages[messages.length - 1].attachments?.some((x: ChatBubbleAttachment) => x.isImage)),
+                ) && (
                   <div className="flex flex-col items-start animate-in fade-in slide-in-from-bottom-4 duration-300">
                     <div className={CHAT_ASSISTANT_IMAGE_ROW_CLASS}>
                       <div className="min-h-10 w-fit max-w-full px-3 py-1.5 rounded-xl flex items-center justify-center shrink-0 border shadow-lg bg-[#1a1a1a] border-white/5 text-gray-400">
@@ -1223,7 +1632,9 @@ export default function OpenBotDashboard() {
                       </div>
                       <div className="flex flex-col items-start min-w-0 w-full">
                         <div className="rounded-2xl border border-white/5 bg-[#151515] p-6 w-full max-w-[min(92vw,28rem)] min-h-[180px] shadow-xl">
-                          <p className="text-sm font-medium text-white mb-5 tracking-tight">Creando imagen</p>
+                          <p className="text-sm font-medium text-white mb-5 tracking-tight">
+                            Generando o editando imagen…
+                          </p>
                           <div className="grid grid-cols-10 gap-2 opacity-35">
                             {Array.from({ length: 50 }).map((_, j) => (
                               <div key={j} className="w-1.5 h-1.5 rounded-full bg-gray-400" />
@@ -1236,82 +1647,155 @@ export default function OpenBotDashboard() {
                 )}
             </div>
 
-            <div className={`relative z-[1] ${CHAT_COMPOSER_CLASS}`}>
-              {/* Preview de Imagen Adjunta */}
-              {attachedImage && (
-                <div className="mb-2 p-3 flex items-center gap-3 bg-black/40 rounded-xl border border-white/5 animate-in slide-in-from-top-2 duration-300">
-                  <div className="relative w-16 h-16 rounded-lg overflow-hidden border border-red-500/30 shrink-0">
-                    <img src={attachedImage} alt="Preview" className="w-full h-full object-cover" />
-                    <button 
-                      onClick={() => setAttachedImage(null)}
-                      className="absolute top-1 right-1 p-1 bg-red-600 rounded-full text-white hover:bg-red-500 transition-all shadow-lg"
-                    >
-                      <RotateCcw size={10} className="rotate-45" />
-                    </button>
-                  </div>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">Imagen Adjunta</span>
-                    <span className="text-[9px] text-gray-500 font-bold">Lista para editar o procesar</span>
-                  </div>
-                </div>
-              )}
+            <div
+              className={`relative z-[1] shrink-0 min-h-0 ${CHAT_COMPOSER_CLASS}`}
+              onDragEnter={handleComposerDragOver}
+              onDragOver={handleComposerDragOver}
+              onDrop={handleComposerDrop}
+            >
+              <input
+                id={OPENBOT_CHAT_FILE_INPUT_ID}
+                ref={fileInputRef}
+                type="file"
+                multiple
+                tabIndex={-1}
+                className="openbot-sr-file-input"
+                onChange={handleFileChange}
+              />
 
-              <div className="relative flex min-h-[52px] items-center gap-2 px-2 py-2">
-                <textarea 
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                  placeholder={`Pregunta lo que sea en modo ${aiMode === 'local' ? 'Local' : 'Nube'}...`}
-                  rows={1}
-                  className={`relative z-0 min-h-[44px] max-h-[min(30vh,200px)] min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1 py-2 text-sm leading-normal outline-none transition-all ${
-                    isRecording
-                      ? 'text-gray-200 placeholder:text-gray-600'
-                      : 'text-transparent caret-white placeholder:text-transparent'
-                  }`}
-                />
-                {!isRecording && (
-                  <div className="pointer-events-none absolute inset-y-2 left-2 right-[calc(7.5rem+0.5rem)] flex items-center overflow-hidden text-sm leading-normal text-gray-600">
-                    {inputText.length === 0 ? (
-                      <span className="truncate">{`Pregunta lo que sea en modo ${aiMode === 'local' ? 'Local' : 'Nube'}...`}</span>
+              {composerAttachments.length > 0 ? (
+                <div className="mb-2 flex gap-2.5 overflow-x-auto overflow-y-visible px-0.5 pb-1 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/15">
+                  {composerAttachments.map((att) =>
+                    att.isImage ? (
+                      <div
+                        key={att.id}
+                        className="relative h-[72px] w-[72px] shrink-0 overflow-visible rounded-xl border border-white/15 bg-zinc-950 shadow-lg ring-1 ring-black/40"
+                      >
+                        <div className="relative h-full w-full overflow-hidden rounded-xl">
+                          <DataUrlImagePreview
+                            src={att.dataUrl}
+                            label={att.name}
+                            className="h-full w-full object-cover"
+                            fallbackClassName="h-full min-h-[4.5rem] w-full"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            patchComposerAttachments((prev) =>
+                              prev.filter((p) => p.id !== att.id),
+                            )
+                          }
+                          className="absolute -right-1.5 -top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-white text-black shadow-md ring-2 ring-[#111] transition hover:bg-gray-100"
+                          title="Quitar adjunto"
+                          aria-label={`Quitar ${att.name}`}
+                        >
+                          <X size={12} strokeWidth={2.5} />
+                        </button>
+                      </div>
                     ) : (
-                      <span className="whitespace-pre-wrap break-words text-gray-200">{inputText}</span>
-                    )}
-                  </div>
-                )}
-                {isRecording && (
-                  <div
-                    className="pointer-events-none absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center"
-                    aria-live="polite"
-                    aria-label={`Grabando, duración ${formatTime(recordingTime)}`}
-                  >
-                    <span className="text-3xl font-black leading-none tracking-tight text-red-400 tabular-nums drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] sm:text-4xl">
-                      {formatTime(recordingTime)}
-                    </span>
-                  </div>
-                )}
-                <div className="relative z-20 flex shrink-0 items-center gap-1.5">
+                      <div
+                        key={att.id}
+                        className="relative flex h-[72px] min-w-[180px] max-w-[260px] shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-gradient-to-br from-red-950/60 to-black/70 px-3 py-2 pr-8 shadow-lg ring-1 ring-black/30"
+                      >
+                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-600 text-white shadow-inner">
+                          <FileText size={18} strokeWidth={2} />
+                        </span>
+                        <span className="min-w-0 flex-1 flex flex-col gap-0.5 text-left leading-tight">
+                          <span className="truncate text-[11px] font-bold text-gray-100">
+                            {att.name}
+                          </span>
+                          <span className="text-[9px] font-black uppercase tracking-wider text-gray-500">
+                            {fileExtensionBadge(att.name)}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            patchComposerAttachments((prev) =>
+                              prev.filter((p) => p.id !== att.id),
+                            )
+                          }
+                          className="absolute -right-1.5 -top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-white text-black shadow-md ring-2 ring-[#111] transition hover:bg-gray-100"
+                          title="Quitar archivo"
+                          aria-label={`Quitar ${att.name}`}
+                        >
+                          <X size={12} strokeWidth={2.5} />
+                        </button>
+                      </div>
+                    ),
+                  )}
+                </div>
+              ) : null}
+
+              <div className="relative flex min-h-[52px] items-start gap-2 px-1 py-2 sm:items-center">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="mt-1 flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-xl text-gray-400 transition hover:bg-white/10 hover:text-white sm:mt-0"
+                  title="Añadir imágenes u otros archivos"
+                  aria-label="Añadir archivos"
+                >
+                  <Plus size={22} strokeWidth={2} aria-hidden />
+                </button>
+                <div className="relative min-h-[44px] min-w-0 flex-1">
+                  <textarea
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
+                    placeholder="Pregunta lo que quieras"
+                    rows={1}
+                    className={`relative z-0 min-h-[44px] w-full max-h-[min(30vh,200px)] resize-none overflow-y-auto bg-transparent py-2 pr-1 text-sm leading-normal outline-none transition-all ${
+                      isRecording
+                        ? "text-gray-200 placeholder:text-gray-600"
+                        : "text-transparent caret-white placeholder:text-transparent"
+                    }`}
+                  />
+                  {!isRecording && (
+                    <div className="pointer-events-none absolute inset-0 flex items-center overflow-hidden py-2 text-sm leading-normal text-gray-500">
+                      {inputText.length === 0 ? (
+                        <span className="truncate">Pregunta lo que quieras</span>
+                      ) : (
+                        <span className="whitespace-pre-wrap break-words text-gray-200">{inputText}</span>
+                      )}
+                    </div>
+                  )}
+                  {isRecording && (
+                    <div
+                      className="pointer-events-none absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+                      aria-live="polite"
+                      aria-label={`Grabando, duración ${formatTime(recordingTime)}`}
+                    >
+                      <span className="text-2xl font-black leading-none tracking-tight text-red-400 tabular-nums drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] sm:text-3xl">
+                        {formatTime(recordingTime)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="relative z-20 mt-1 flex shrink-0 items-center gap-1 sm:mt-0">
                   <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="p-2 text-gray-500 hover:text-white hover:bg-black/40 rounded-lg transition-all duration-300 border-2 border-transparent hover:border-white"
-                    title="Adjuntar imagen"
-                  >
-                    <Paperclip size={17} />
-                  </button>
-                  <button 
-                    onClick={toggleMic} 
-                    className={`p-2 rounded-lg transition-all duration-300 border-2 ${isRecording ? 'text-red-500 bg-red-500/10 border-red-500/50 animate-pulse' : 'text-gray-500 border-transparent hover:text-white hover:bg-black/40 hover:border-white'}`}
+                    onClick={toggleMic}
+                    className={`p-2 rounded-lg transition-all duration-300 border-2 ${isRecording ? "text-red-500 bg-red-500/10 border-red-500/50 animate-pulse" : "text-gray-500 border-transparent hover:text-white hover:bg-black/40 hover:border-white"}`}
                     title={isRecording ? "Detener Grabación" : "Grabar Audio"}
                   >
                     {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
                   </button>
 
-                  <button 
-                    onClick={() => handleSend()} 
-                    disabled={isSending || !inputText.trim()} 
+                  <button
+                    type="button"
+                    onClick={() => handleSend()}
+                    disabled={
+                      isSending || (!inputText.trim() && composerAttachments.length === 0)
+                    }
                     className={CHAT_ENVIAR_BUTTON_CLASS}
                   >
-                    {isSending ? 'Enviando' : 'Enviar'} <Send size={CHAT_ENVIAR_ICON_SIZE} className={isSending ? 'animate-ping' : ''} />
+                    {isSending ? "Enviando" : "Enviar"}{" "}
+                    <Send size={CHAT_ENVIAR_ICON_SIZE} className={isSending ? "animate-ping" : ""} />
                   </button>
                 </div>
               </div>

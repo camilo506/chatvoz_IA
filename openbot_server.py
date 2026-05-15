@@ -86,12 +86,18 @@ class OpenBotBrain:
             return "qwen2.5-coder:7b"
         return default_model
 
-    def process_command(self, text, mode="cloud", image_base64=None):
+    def process_command(self, text, mode="cloud", image_base64=None, image_base64_list=None):
         """
         Procesa comandos de texto y ejecuta acciones en el sistema.
         Retorna (respuesta, fue_comando, imagen_data_url_o_None).
         Si imagen_data_url no es None, el cliente puede mostrar la imagen en el chat.
+        image_base64_list: lista opcional de data URLs (primera entrada compatible con image_base64).
         """
+        adj_images = []
+        if image_base64_list is not None and isinstance(image_base64_list, list):
+            adj_images = [x for x in image_base64_list if isinstance(x, str) and x.strip()]
+        if not adj_images and isinstance(image_base64, str) and image_base64.strip():
+            adj_images = [image_base64]
         def _file_to_data_url(image_path):
             import base64 as b64
             with open(image_path, "rb") as imgf:
@@ -120,6 +126,8 @@ class OpenBotBrain:
             return f"data:{mime};base64," + b64.standard_b64encode(raw).decode("ascii")
 
         t = text.lower()
+        user_facing = text.split("---")[0].strip() if text and "---" in text else (text or "").strip()
+        t_img = user_facing.lower()
         
         # 1. Info del Sistema
         if any(x in t for x in ["componentes", "hardware", "dime mi pc", "info sistema"]):
@@ -257,13 +265,30 @@ class OpenBotBrain:
             )
             return any(m in pad for m in markers)
 
-        if _message_requests_image(t):
+        def _attachment_edit_request(low: str) -> bool:
+            """Pedidos de edición sobre una imagen ya adjunta (texto o voz)."""
+            markers = (
+                "cambia", "cambiar", "cambiale", "modifica", "modificá", "editar", "edita",
+                "ajusta", "reemplaza", "transforma", "convierte", "quita", "añade", "agrega",
+                "camisa", "camiseta", "pantal", "pantalón", "pantalon", "pelo", "ojos", "fondo",
+                "pon la", "pon el", "ponle", "haz que", "que sea",
+                " a azul", " a rojo", " a verde", " a negro", " a blanco", " a amarillo",
+                "de azul", "de rojo", "color ", " color,", "color.",
+                "igual pero", "misma foto", "esta foto", "esta imagen", "la imagen que",
+                "teñ", "tiñ", "pinte", "pinta la",
+            )
+            return any(m in low for m in markers)
+
+        def _wants_image_pipeline(low_user: str, has_adj: bool) -> bool:
+            return _message_requests_image(low_user) or (has_adj and _attachment_edit_request(low_user))
+
+        if _wants_image_pipeline(t_img, len(adj_images) > 0):
             import os
             import urllib.parse
             import urllib.request
             import requests
 
-            prompt = t
+            prompt = t_img
             for kw in sorted(img_keywords, key=len, reverse=True):
                 prompt = prompt.replace(kw, " ")
             for noise in (
@@ -284,11 +309,16 @@ class OpenBotBrain:
             while "  " in prompt:
                 prompt = prompt.replace("  ", " ")
             
-            if len(prompt) < 3: prompt = "cyberpunk city landscape"
+            if len(prompt) < 3:
+                prompt = (
+                    "high quality photo refinement, preserve subject"
+                    if len(adj_images) > 0
+                    else "cyberpunk city landscape"
+                )
 
             # Imágenes solo para el chat (data URL): no escribimos en OUTPUT_DIR; el usuario descarga con "Descargar" en el panel.
-            # Si hay una imagen adjunta, forzamos modo local (Img2Img) porque Pollinations no lo soporta de forma simple.
-            is_img2img = image_base64 is not None
+            # Si hay imágenes adjuntas, forzamos modo local (Img2Img) porque Pollinations no lo soporta de forma simple.
+            is_img2img = len(adj_images) > 0
             
             if mode == "cloud" and not is_img2img:
                 try:
@@ -417,16 +447,103 @@ class OpenBotBrain:
                     # API Local de Automatic1111 / Forge
                     if is_img2img:
                         url = "http://127.0.0.1:7860/sdapi/v1/img2img"
-                        # Limpiar cabecera base64 (ej: "data:image/jpeg;base64,")
-                        base64_data = image_base64.split(",")[1] if "," in image_base64 else image_base64
+                        init_images = []
+                        for rawsrc in adj_images:
+                            b = rawsrc.split(",", 1)[1] if "," in rawsrc else rawsrc
+                            init_images.append(b)
+                        prompt_core = prompt.strip()
+                        if len(prompt_core) < 3:
+                            prompt_core = "subtle improvements, keep composition"
+
+                        apparel_kw = (
+                            "pantal",
+                            "bermuda",
+                            "short",
+                            "camisa",
+                            "camiseta",
+                            "calcetín",
+                            "calcetin",
+                            "zapat",
+                            "gorro",
+                            "sombrero",
+                            "abrigo",
+                            "chaqueta",
+                            "jersey",
+                            "ropa",
+                            "vestido",
+                            "falda",
+                            "sujeto",
+                            "sugeto",
+                        )
+                        is_apparel_edit = any(k in t_img for k in apparel_kw) or any(
+                            k in prompt_core for k in apparel_kw
+                        )
+
+                        bg_change = any(
+                            k in t_img
+                            for k in (
+                                "todo el fondo",
+                                "cambiar el fondo",
+                                "otro fondo",
+                                "fondo completamente",
+                                "escena entera",
+                            )
+                        )
+
+                        if bg_change:
+                            denoise = 0.62
+                            cfg_scale = 7.5
+                            prompt_sd = (
+                                "professional photo editing of the input image, preserve identity facial features "
+                                "hands body pose unless the edit clearly requires changing them, "
+                                f"user edit instruction in Spanish context: {prompt_core}, "
+                                "photorealistic, coherent lighting, natural colors, sharp detail"
+                            )
+                            neg_extra = ""
+                        elif is_apparel_edit:
+                            denoise = 0.34
+                            cfg_scale = 8.0
+                            prompt_sd = (
+                                "STRICT image-to-image edit of this exact photograph — preserve the same real "
+                                "person (same face identity age skin tone expression glasses beard hair), same upper "
+                                "body shirt arms hands accessories footwear socks pose leg position camera angle "
+                                "lighting shadows depth of field and every background detail unchanged. "
+                                "ONLY modify clothing as instructed (localized garment swap): "
+                                f"{prompt_core}. "
+                                "Photorealistic fabric folds and seams consistent with scene lighting; "
+                                "do not invent a different human or location."
+                            )
+                            neg_extra = (
+                                "different person, another person, face swap, identity change, wrong age, gender swap, "
+                                "duplicate subject, twin, cropped portrait, new background, indoor studio, painting look"
+                            )
+                        else:
+                            denoise = 0.42
+                            cfg_scale = 7.0
+                            prompt_sd = (
+                                "professional photo editing of the input image, preserve identity facial features "
+                                "hands body pose and scene unless the edit clearly requires changing them, "
+                                f"user edit instruction in Spanish context: {prompt_core}, "
+                                "photorealistic, coherent lighting, natural colors, sharp detail"
+                            )
+                            neg_extra = ""
+
+                        negative_prompt = (
+                            "ugly, deformed, mutated, extra limbs, poorly drawn, bad anatomy, "
+                            "watermark, signature, text, logo"
+                        )
+                        if neg_extra:
+                            negative_prompt = f"{negative_prompt}, {neg_extra}"
+
                         payload = {
-                            "prompt": prompt,
-                            "negative_prompt": "ugly, deformed, mutated, extra limbs, poorly drawn, bad anatomy",
-                            "steps": 25,
+                            "prompt": prompt_sd,
+                            "negative_prompt": negative_prompt,
+                            "steps": 28,
                             "width": IMAGE_GEN_SIZE,
                             "height": IMAGE_GEN_SIZE,
-                            "init_images": [base64_data],
-                            "denoising_strength": 0.65
+                            "init_images": init_images,
+                            "denoising_strength": denoise,
+                            "cfg_scale": cfg_scale,
                         }
                     else:
                         url = "http://127.0.0.1:7860/sdapi/v1/txt2img"
@@ -457,7 +574,12 @@ class OpenBotBrain:
                                 True,
                                 None,
                             )
-                        return "Imagen generada.", True, _bytes_to_data_url(image_data)
+                        msg_ok = (
+                            "He aplicado tu instrucción sobre la imagen adjunta (Forge img2img)."
+                            if is_img2img
+                            else "Imagen generada."
+                        )
+                        return msg_ok, True, _bytes_to_data_url(image_data)
                     else:
                         return f"❌ Error: El motor local respondió con código {response.status_code}.", True, None
                 except requests.exceptions.ConnectionError:
@@ -745,6 +867,7 @@ async def chat(request: dict):
     url = request.get("url", "http://localhost:11434")
     model = request.get("model", "llama3.2:latest")
     image_base64 = request.get("image_base64", None)
+    image_base64_list = request.get("image_base64_list", None)
     
     brain.add_log(f"Mensaje recibido [{mode.upper()}]: {message}", "user")
     
@@ -753,7 +876,12 @@ async def chat(request: dict):
         
     brain.history.append({"role": "user", "content": message})
     
-    cmd_res, is_cmd, cmd_image = brain.process_command(message, mode=mode, image_base64=image_base64)
+    cmd_res, is_cmd, cmd_image = brain.process_command(
+        message,
+        mode=mode,
+        image_base64=image_base64,
+        image_base64_list=image_base64_list,
+    )
     if is_cmd:
         brain.history.append({"role": "assistant", "content": cmd_res})
         out = {"response": cmd_res, "time": time.strftime("%I:%M %p")}

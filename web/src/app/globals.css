@@ -10,6 +10,22 @@ body {
   color: #e0e0e0;
 }
 
+/* Input type=file oculto sin display:none (mejor compat. con .click() y lectura). */
+.openbot-sr-file-input {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* Estilos de Barra de Desplazamiento Personalizada */
 ::-webkit-scrollbar {
   width: 6px;
