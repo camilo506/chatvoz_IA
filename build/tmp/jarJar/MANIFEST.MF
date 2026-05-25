@@ -1,0 +1,9 @@
+Manifest-Version: 1.0
+Specification-Title: sevinoasistente
+Specification-Vendor: Sevino
+Specification-Version: 1
+Implementation-Title: sevinoasistente
+Implementation-Version: 0.1.0
+Implementation-Vendor: Sevino
+Implementation-Timestamp: 2026-05-09T22:38:44-0600
+

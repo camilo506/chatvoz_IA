@@ -1,0 +1,16 @@
+
+#Voz de Sevino (solo en tu maquina).
+[voice]
+	#true = descargar y reproducir voz MP3 (internet).
+	#false = solo narrador de Minecraft (activa Accesibilidad > Narrador o Ctrl+B).
+	downloadVoiceMp3 = true
+	#Voz preferida StreamElements (kappa v2/v3). Masculinas español: Pedro, Sergio, Andres, Enrique, Miguel.
+	#El mod reintenta otras masculinas si la tuya falla.
+	streamElementsVoice = "Enrique"
+	#Idioma del respaldo Google si StreamElements falla (solo si useGoogleTtsFallback=true).
+	#Con es se prueba es-us y luego es.
+	googleTtsLang = "es"
+	#true = respaldo Google si StreamElements falla (p. ej. HTTP 401). false = sin MP3 si solo falla StreamElements.
+	#false puede dejarte sin voz si la API de StreamElements exige sesion.
+	useGoogleTtsFallback = true
+

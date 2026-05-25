@@ -1,0 +1,24 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="sevinoasistente"
+version="0.1.0"
+displayName="Sevino Asistente"
+authors="Sevino"
+description='''Asistente IA local (Ollama) que ayuda al jugador a aprender ingles dentro de Minecraft.'''
+
+[[dependencies.sevinoasistente]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.sevinoasistente]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.21)"
+    ordering="NONE"
+    side="BOTH"

@@ -1,0 +1,11 @@
+
+#Voz de Sevino (solo en tu maquina).
+[voice]
+	#true = descargar y reproducir voz MP3 (internet).
+	#false = solo narrador de Minecraft (activa Accesibilidad > Narrador o Ctrl+B).
+	downloadVoiceMp3 = true
+	#Voz StreamElements (respaldo). El audio principal sale de Google TTS con googleTtsLang.
+	streamElementsVoice = "Miguel"
+	#Idioma principal del TTS (Google). Recomendado es para español.
+	googleTtsLang = "es"
+

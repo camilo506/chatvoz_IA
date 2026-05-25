@@ -1,0 +1,55 @@
+
+#Configuracion general de IA.
+[general]
+	#Proveedor de IA principal. Opciones: 'ollama' (local) o 'groq' (nube).
+	aiProvider = "groq"
+
+#Configuracion de Groq (Nube - Alta velocidad).
+[groq]
+	#Tu API Key de Groq (gsk_...).
+	apiKey = "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"
+	#Modelo de lenguaje de Groq. Ej: llama-3.1-8b-instant, llama-3.3-70b-versatile.
+	model = "llama-3.1-8b-instant"
+	#Modelo de Speech-to-Text de Groq. Recomendado: whisper-large-v3-turbo.
+	whisperModel = "whisper-large-v3-turbo"
+
+#Conexion con Ollama (IA local).
+[ollama]
+	#URL base del servidor Ollama. Por defecto el servidor local.
+	#Se usa 127.0.0.1 en lugar de 'localhost' para forzar IPv4 y evitar problemas
+	#cuando Ollama solo escucha en IPv4 mientras Java intenta IPv6 (::1).
+	url = "http://127.0.0.1:11434"
+	#Modelo a usar. RECOMENDADOS: llama3.1 (8B), llama3.2 (3B), qwen2.5 (7B).
+	model = "llama3.1"
+	#Timeout en segundos para cada peticion HTTP a Ollama.
+	#Range: 5 ~ 600
+	timeoutSeconds = 60
+	#Maximo de tokens en la respuesta del modelo (num_predict).
+	#Range: 16 ~ 4096
+	maxTokens = 256
+	#Temperatura del modelo (0.0 = deterministico, 1.0 = creativo).
+	#Range: 0.0 ~ 2.0
+	temperature = 0.7
+
+#Prefijos para interactuar con el asistente desde el chat.
+[chat]
+	#Prefijo de chat para conversar con el asistente. Ej: '!ai hola'.
+	prefix = "!ai"
+	#Prefijo de chat para traducir rapidamente. Ej: '!tr cat'.
+	translatePrefix = "!tr"
+	#Prefijo de chat para que el asistente corrija una frase en ingles. Ej: '!en I has a cat'.
+	correctPrefix = "!en"
+
+#Comportamiento del asistente.
+[assistant]
+	#Nivel de ingles del jugador. Valores: beginner, intermediate, advanced.
+	englishLevel = "beginner"
+	#Si es true, el asistente recibe informacion del estado del juego (bioma, hotbar, bloque mirado, hora).
+	includeGameContext = true
+	#Si es true, el asistente puede sugerir correcciones cuando detecte errores en mensajes en ingles.
+	allowAutoCorrect = true
+	#Temas para el vocabulario del dia.
+	vocabTopics = ["mining", "farming", "animals", "food", "weather", "directions", "tools", "combat", "building"]
+	#Si es true, el narrador solo leera la parte en ingles de la respuesta.
+	narrateOnlyEnglish = false
+
